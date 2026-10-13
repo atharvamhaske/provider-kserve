@@ -59,10 +59,6 @@ ui:
           path: spec.components.predictor.parameters.storageContainer
           fieldParams:
             label: Storage Container
-            placeholder: default
-            helperText: >-
-              Optional ClusterStorageContainer that downloads the model. Leave
-              empty to let KServe pick one by storage URI.
       componentsOrder:
       - version
       - modelFormat
