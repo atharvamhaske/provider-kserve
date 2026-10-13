@@ -15,7 +15,6 @@ spec:
   predictor:
     minReplicas: 1
     maxReplicas: 3
-    storageContainerName: custom-s3-init
     model:
       modelFormat:
         name: sklearn

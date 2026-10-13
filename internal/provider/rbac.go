@@ -11,6 +11,8 @@ package provider
 // +kubebuilder:rbac:groups=core.openeverest.io,resources=providers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// The runtime counts the labelled component pods into Instance status.components.
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // =============================================================================
 // PROVIDER-SPECIFIC RBAC — KServe serving resources.
@@ -28,11 +30,14 @@ package provider
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices/status,verbs=get
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices/finalizers,verbs=update
+// Validation checks the ClusterStorageContainer a predictor names:
+// +kubebuilder:rbac:groups=serving.kserve.io,resources=clusterstoragecontainers,verbs=get;list;watch
 
 // Envoy AI Gateway resources used by the optional llm access path:
 // +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes/status,verbs=get
 // +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=backendtrafficpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=securitypolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
 

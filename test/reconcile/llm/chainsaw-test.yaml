@@ -10,7 +10,7 @@ spec:
     collected on deletion.
 
     Readiness is deliberately NOT asserted here — see the note in
-    ../predictor/chainsaw-test.yaml. The llmisvc controller owns
+    ../predictor/lifecycle/chainsaw-test.yaml. The llmisvc controller owns
     LLMInferenceService.status the same way, so faking Ready is the same race;
     this path just used to win it more often.
   catch:

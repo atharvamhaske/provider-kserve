@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
@@ -27,7 +28,7 @@ const (
 	computeProfileCPU = "cpu"
 
 	// cpuProfileConfigName is the name of the bundled CPU LLMInferenceServiceConfig
-	// rendered by the chart (templates/llmisvcconfig-cpu.yaml). It must match the
+	// rendered by the chart (templates/_kserve-objects.tpl). It must match the
 	// chart's metadata.name.
 	cpuProfileConfigName = "kserve-config-llm-cpu"
 
@@ -52,6 +53,18 @@ const (
 	// vllmServingPort is the port the vLLM OpenAI-compatible API listens on and
 	// the port KServe's workload Service targets.
 	vllmServingPort = 8000
+
+	nvidiaGPUResource = corev1.ResourceName("nvidia.com/gpu")
+
+	// storageInitializerContainerName is KServe's model download init container;
+	// KServe merges a same-named init container in the pod template into it.
+	storageInitializerContainerName = "storage-initializer"
+
+	// gpuLibraryPathEnvVar / gpuLibraryPathValue add the NVIDIA driver lib dir to
+	// the compile-time linker search path for the GPU profile. See
+	// gpuLibraryPathEnv for the full rationale.
+	gpuLibraryPathEnvVar = "LIBRARY_PATH"
+	gpuLibraryPathValue  = "/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
 )
 
 // workloadPodSelector returns the label selector KServe stamps on an
@@ -115,6 +128,11 @@ func validateLLM(c *controller.Context) error {
 	if topo.UsesAIGateway() && !common.AIGatewayEnabled() {
 		return fmt.Errorf("externalAccess EnvoyAIGateway requires aiGateway.enabled in the provider chart")
 	}
+	if topo.UsesAIGateway() {
+		if err := validateAIGatewayAccess(c, servedModelName(c.Name(), params.ModelName)); err != nil {
+			return err
+		}
+	}
 	if topo.TokenLimitPerHour != nil {
 		if !topo.UsesAIGateway() {
 			return fmt.Errorf("tokenLimitPerHour requires External access = EnvoyAIGateway")
@@ -132,6 +150,9 @@ func validateLLM(c *controller.Context) error {
 	); err != nil {
 		return err
 	}
+	if comp.Replicas != nil && decode.enabled() {
+		return fmt.Errorf("%s.replicas cannot be set with minReplicas, maxReplicas, or scalingActuator", common.ComponentLlmEngine)
+	}
 	prefill := prefillScaling(topo)
 	if prefill.enabled() && !topo.EnablePrefill {
 		return fmt.Errorf("prefill autoscaling requires enablePrefill")
@@ -144,8 +165,58 @@ func validateLLM(c *controller.Context) error {
 	); err != nil {
 		return err
 	}
+	if topo.PrefillReplicas != nil && prefill.enabled() {
+		return fmt.Errorf("topology.parameters.prefillReplicas cannot be set with prefillMinReplicas, prefillMaxReplicas, or prefillScalingActuator")
+	}
 	if decode.enabled() && prefill.enabled() && resolvedActuator(decode.actuator) != resolvedActuator(prefill.actuator) {
 		return fmt.Errorf("decode and prefill must use the same scalingActuator (KServe WVA)")
+	}
+	if err := validateWorkerGroup(
+		params.WorkerCount,
+		params.PipelineParallelSize,
+		params.WorkerResources != nil,
+		common.ComponentLlmEngine+".parameters.workerCount",
+		common.ComponentLlmEngine+".parameters.pipelineParallelSize",
+		common.ComponentLlmEngine+".parameters.workerResources",
+	); err != nil {
+		return err
+	}
+	cpuProfile := strings.EqualFold(params.ComputeProfile, computeProfileCPU)
+	if params.GpuCount != nil {
+		if cpuProfile {
+			return fmt.Errorf("%s.parameters.gpuCount is only valid for the GPU compute profile", common.ComponentLlmEngine)
+		}
+		if *params.GpuCount < 1 {
+			return fmt.Errorf("%s.parameters.gpuCount must be at least 1", common.ComponentLlmEngine)
+		}
+	}
+	effRes := withGPUCount(comp.Resources, params.GpuCount, cpuProfile)
+	if err := validateTensorGPU(effRes, params.TensorParallelSize, cpuProfile, common.ComponentLlmEngine+".resources"); err != nil {
+		return err
+	}
+	if params.WorkerCount != nil {
+		if err := validateTensorGPU(overlayResources(effRes, params.WorkerResources), params.TensorParallelSize, cpuProfile, common.ComponentLlmEngine+".parameters.workerResources"); err != nil {
+			return err
+		}
+	}
+	prefillWorkers := topo.PrefillWorkerCount != nil || topo.PrefillWorkerResources != nil
+	if prefillWorkers && !topo.EnablePrefill {
+		return fmt.Errorf("prefill worker fields require enablePrefill")
+	}
+	if err := validateWorkerGroup(
+		topo.PrefillWorkerCount,
+		topo.PrefillPipelineParallelSize,
+		topo.PrefillWorkerResources != nil,
+		"topology.parameters.prefillWorkerCount",
+		"topology.parameters.prefillPipelineParallelSize",
+		"topology.parameters.prefillWorkerResources",
+	); err != nil {
+		return err
+	}
+	if topo.PrefillWorkerCount != nil {
+		if err := validateTensorGPU(overlayResources(effRes, topo.PrefillWorkerResources), params.TensorParallelSize, cpuProfile, "topology.parameters.prefillWorkerResources"); err != nil {
+			return err
+		}
 	}
 	return validateLoRAParams(c.Name(), params)
 }
@@ -200,6 +271,121 @@ func validateWorkloadScaling(s workloadScaling, minField, maxField, actuatorFiel
 		return fmt.Errorf("%s must be %s or %s", actuatorField, components.ScalingActuatorHPA, components.ScalingActuatorKEDA)
 	}
 	return nil
+}
+
+func validateWorkerGroup(count, pipeline *int32, resourcesSet bool, countField, pipelineField, resourcesField string) error {
+	if count == nil {
+		if resourcesSet {
+			return fmt.Errorf("%s requires %s", resourcesField, countField)
+		}
+		return nil
+	}
+	if *count < 1 {
+		return fmt.Errorf("%s must be at least 1", countField)
+	}
+	if pipeline == nil {
+		return fmt.Errorf("%s is required when %s is set", pipelineField, countField)
+	}
+	if *pipeline != *count+1 {
+		return fmt.Errorf("%s must equal %s + 1 (got %d, want %d)", pipelineField, countField, *pipeline, *count+1)
+	}
+	return nil
+}
+
+// withGPUCount returns res with the nvidia.com/gpu limit derived from gpuCount
+// for the GPU profile. gpuCount is the number of GPUs each vLLM pod (head and
+// every worker) requests; the bundled presets set no GPU limit, so without this
+// the pod is scheduled with no GPU and vLLM cannot find a device. An explicit
+// gpuCount wins; otherwise an existing GPU limit is preserved and the GPU
+// profile defaults to 1. The CPU profile is left untouched.
+func withGPUCount(res *corev1.ResourceRequirements, gpuCount *int32, cpuProfile bool) *corev1.ResourceRequirements {
+	if cpuProfile {
+		return res
+	}
+	out := &corev1.ResourceRequirements{}
+	if res != nil {
+		out = res.DeepCopy()
+	}
+	if out.Limits == nil {
+		out.Limits = corev1.ResourceList{}
+	}
+	switch {
+	case gpuCount != nil:
+		count := int64(*gpuCount)
+		if count < 1 {
+			count = 1
+		}
+		out.Limits[nvidiaGPUResource] = *resource.NewQuantity(count, resource.DecimalSI)
+	default:
+		if _, ok := out.Limits[nvidiaGPUResource]; !ok {
+			out.Limits[nvidiaGPUResource] = *resource.NewQuantity(1, resource.DecimalSI)
+		}
+	}
+	return out
+}
+
+func validateTensorGPU(res *corev1.ResourceRequirements, tp *int32, cpuProfile bool, path string) error {
+	if cpuProfile || tp == nil || *tp < 1 || res == nil {
+		return nil
+	}
+	q, ok := res.Limits[nvidiaGPUResource]
+	if !ok {
+		return nil
+	}
+	if q.Value() < int64(*tp) {
+		return fmt.Errorf("%s limits.nvidia.com/gpu (%d) must be >= tensorParallelSize (%d)", path, q.Value(), *tp)
+	}
+	return nil
+}
+
+// overlayResources copies head, then applies overlay keys (UI may set only CPU/memory).
+func overlayResources(head, overlay *corev1.ResourceRequirements) *corev1.ResourceRequirements {
+	if overlay == nil {
+		return head
+	}
+	if head == nil {
+		return overlay
+	}
+	out := head.DeepCopy()
+	if len(overlay.Limits) > 0 {
+		if out.Limits == nil {
+			out.Limits = corev1.ResourceList{}
+		}
+		for k, v := range overlay.Limits {
+			out.Limits[k] = v
+		}
+	}
+	if len(overlay.Requests) > 0 {
+		if out.Requests == nil {
+			out.Requests = corev1.ResourceList{}
+		}
+		for k, v := range overlay.Requests {
+			out.Requests[k] = v
+		}
+	}
+	return out
+}
+
+func buildWorkerPodSpec(res *corev1.ResourceRequirements, gpu bool) *corev1.PodSpec {
+	c := corev1.Container{Name: "main"}
+	if res != nil {
+		c.Resources = *res
+	}
+	if gpu {
+		c.Env = append(c.Env, gpuLibraryPathEnv())
+	}
+	return &corev1.PodSpec{Containers: []corev1.Container{c}}
+}
+
+// gpuLibraryPathEnv returns the LIBRARY_PATH env var that makes libcuda.so.1
+// discoverable to the compile-time linker (gcc/ld) that vLLM's Triton and
+// Inductor JIT steps invoke on GPU nodes. The NVIDIA GPU Operator injects the
+// driver into the Debian multiarch dir, which the CUDA runtime image's ld does
+// not search by default, so without it GPU models crash at engine warm-up with
+// "cannot find -l:libcuda.so.1". gcc honors LIBRARY_PATH for -l link-time
+// lookups (the compile-time analog of LD_LIBRARY_PATH).
+func gpuLibraryPathEnv() corev1.EnvVar {
+	return corev1.EnvVar{Name: gpuLibraryPathEnvVar, Value: gpuLibraryPathValue}
 }
 
 func buildScalingSpec(s workloadScaling) *kservev1alpha2.ScalingSpec {
@@ -452,6 +638,7 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 		Model: kservev1alpha2.LLMModelSpec{URI: *uri},
 	}
 	spec.Model.Name = ptr.To(servedModelName(c.Name(), params.ModelName))
+	spec.Labels = c.PodLabels(common.ComponentLlmEngine)
 
 	lora, err := buildModelLoRA(params)
 	if err != nil {
@@ -488,14 +675,23 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 		spec.Parallelism = p
 	}
 
+	isCPUProfile := strings.EqualFold(params.ComputeProfile, computeProfileCPU)
+	effRes := withGPUCount(comp.Resources, params.GpuCount, isCPUProfile)
+	if !isCPUProfile {
+		spec.RolloutStrategy = gpuRolloutStrategy()
+	}
+
+	if params.WorkerCount != nil {
+		spec.Worker = buildWorkerPodSpec(overlayResources(effRes, params.WorkerResources), !isCPUProfile)
+	}
+
 	// Optional pod resource requirements from the component spec. KServe
 	// strategic-merges the Instance spec last, so a "main" container override
 	// here wins over the preset and any baseRefs.
 	mainContainer := corev1.Container{Name: "main"}
 	haveMainOverride := false
-	isCPUProfile := strings.EqualFold(params.ComputeProfile, computeProfileCPU)
-	if comp.Resources != nil {
-		res := *comp.Resources
+	if effRes != nil {
+		res := *effRes
 		// For the CPU profile, mirror limits into requests (Guaranteed QoS).
 		if isCPUProfile {
 			res = mirrorLimitsToRequests(res)
@@ -512,6 +708,14 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 			kv = 1
 		}
 		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{Name: cpuKVCacheEnvVar, Value: strconv.Itoa(kv)})
+		haveMainOverride = true
+	}
+
+	// GPU profile: put the NVIDIA driver lib dir on the compile-time linker path
+	// so vLLM's Triton/Inductor JIT steps can link libcuda.so.1 (see
+	// gpuLibraryPathEnv). Without it every GPU model crashes at engine warm-up.
+	if !isCPUProfile {
+		mainContainer.Env = append(mainContainer.Env, gpuLibraryPathEnv())
 		haveMainOverride = true
 	}
 
@@ -539,6 +743,17 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 	for _, name := range routingConfigRefs(topo) {
 		spec.BaseRefs = append(spec.BaseRefs, corev1.LocalObjectReference{Name: name})
 	}
+	// KServe only reports the InferencePool ready for Gateways reached through
+	// an HTTPRoute it knows, so reference the one the AI Gateway generates.
+	if topo.UsesAIGateway() {
+		spec.Router = &kservev1alpha2.RouterSpec{
+			Route: &kservev1alpha2.GatewayRoutesSpec{
+				HTTP: &kservev1alpha2.HTTPRouteSpec{
+					Refs: []corev1.LocalObjectReference{{Name: aiGatewayRouteName(c.Name())}},
+				},
+			},
+		}
+	}
 	for _, ref := range params.BaseRefs {
 		spec.BaseRefs = append(spec.BaseRefs, corev1.LocalObjectReference{Name: ref})
 	}
@@ -556,13 +771,51 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 
 	if topo.EnablePrefill {
 		prefill := &kservev1alpha2.WorkloadSpec{}
+		// Prefill pods serve the same model, so they count towards llmEngine.
+		prefill.Labels = c.PodLabels(common.ComponentLlmEngine)
+		if !isCPUProfile {
+			prefill.RolloutStrategy = gpuRolloutStrategy()
+		}
 		if scale := prefillScaling(topo); scale.enabled() {
 			prefill.Scaling = buildScalingSpec(scale)
 		} else if topo.PrefillReplicas != nil {
 			prefill.Replicas = topo.PrefillReplicas
 		}
+		if topo.PrefillPipelineParallelSize != nil {
+			prefill.Parallelism = &kservev1alpha2.ParallelismSpec{
+				Pipeline: topo.PrefillPipelineParallelSize,
+			}
+		}
+		prefillMain := corev1.Container{Name: "main"}
+		havePrefillMain := false
+		if effRes != nil {
+			res := *effRes
+			if isCPUProfile {
+				res = mirrorLimitsToRequests(res)
+			}
+			prefillMain.Resources = res
+			havePrefillMain = true
+		}
+		if !isCPUProfile {
+			prefillMain.Env = append(prefillMain.Env, gpuLibraryPathEnv())
+			havePrefillMain = true
+		}
+		if havePrefillMain {
+			prefill.Template = &corev1.PodSpec{
+				Containers: []corev1.Container{prefillMain},
+			}
+		}
+		if topo.PrefillWorkerCount != nil {
+			prefill.Worker = buildWorkerPodSpec(overlayResources(effRes, topo.PrefillWorkerResources), !isCPUProfile)
+		}
 		spec.Prefill = prefill
 	}
+
+	storageInitResources, err := common.StorageInitializerResources()
+	if err != nil {
+		return nil, err
+	}
+	applyStorageInitializerResources(&spec, params, storageInitResources)
 
 	// Distributed tracing. A present-but-empty TracingSpec enables KServe's
 	// default OTLP instrumentation; an endpoint override is applied when set.
@@ -581,6 +834,46 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 		ObjectMeta: c.ObjectMeta(c.Name()),
 		Spec:       spec,
 	}, nil
+}
+
+// gpuRolloutStrategy replaces pods one at a time without surging: a surge pod
+// would wait for a GPU still held by the pod it replaces.
+func gpuRolloutStrategy() *kservev1alpha2.RolloutStrategy {
+	return &kservev1alpha2.RolloutStrategy{
+		MaxSurge:       ptr.To(intstr.FromInt32(0)),
+		MaxUnavailable: ptr.To(intstr.FromInt32(1)),
+	}
+}
+
+// applyStorageInitializerResources overrides the storage-initializer resources
+// in every pod KServe downloads the model into. Only hf:// and s3:// models get
+// it: for other schemes KServe adds no storage-initializer of its own, so the
+// override would remain as an image-less init container.
+func applyStorageInitializerResources(spec *kservev1alpha2.LLMInferenceServiceSpec, params components.VllmCustomSpec, res *corev1.ResourceRequirements) {
+	if res == nil || ptr.Deref(params.DisableStorageInitializer, false) {
+		return
+	}
+	if !strings.HasPrefix(params.ModelURI, "hf://") && !strings.HasPrefix(params.ModelURI, "s3://") {
+		return
+	}
+	if spec.Template == nil {
+		spec.Template = &corev1.PodSpec{}
+	}
+	pods := []*corev1.PodSpec{spec.Template, spec.Worker}
+	if spec.Prefill != nil {
+		if spec.Prefill.Template == nil {
+			spec.Prefill.Template = &corev1.PodSpec{}
+		}
+		pods = append(pods, spec.Prefill.Template, spec.Prefill.Worker)
+	}
+	for _, pod := range pods {
+		if pod != nil {
+			pod.InitContainers = append(pod.InitContainers, corev1.Container{
+				Name:      storageInitializerContainerName,
+				Resources: *res.DeepCopy(),
+			})
+		}
+	}
 }
 
 // syncLLM creates or updates the LLMInferenceService.
@@ -771,13 +1064,20 @@ func (p *Provider) statusLLM(c *controller.Context) (controller.Status, error) {
 
 	ready := llmisvc.Status.GetCondition(apis.ConditionReady)
 	if ready != nil && ready.IsTrue() {
+		if waiting := unservedWorkload(llmisvc.Status.Workloads); waiting != "" {
+			return controller.Provisioning(waiting), nil
+		}
+
 		var topo llm.LlmTopologyParameters
 		c.TryDecodeTopologyParameters(&topo)
 
 		// When the AI Gateway is enabled, connection details come from the
 		// Gateway's external address rather than the direct workload URL.
 		if topo.UsesAIGateway() {
-			details, waiting, err := aiGatewayConnectionDetails(c)
+			comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
+			var params components.VllmCustomSpec
+			c.TryDecodeComponentParameters(comp, &params)
+			details, waiting, err := aiGatewayConnectionDetails(c, servedModelName(c.Name(), params.ModelName))
 			if err != nil {
 				return controller.Status{}, err
 			}
@@ -800,6 +1100,22 @@ func (p *Provider) statusLLM(c *controller.Context) (controller.Status, error) {
 	}
 
 	return controller.Provisioning(conditionMessage(ready, "LLMInferenceService is being created")), nil
+}
+
+// unservedWorkload names the first model workload without a ready pod. KServe
+// derives Ready from the Deployment's Available condition, which tolerates
+// maxUnavailable: with the GPU rollout (maxUnavailable 1) a single-replica
+// model is "Available" before its pod has even started.
+func unservedWorkload(ws *kservev1alpha2.WorkloadStatus) string {
+	if ws == nil {
+		return ""
+	}
+	for _, w := range []*kservev1alpha2.ObservedWorkloadStatus{ws.Primary, ws.Prefill} {
+		if w != nil && ptr.Deref(w.ReadyReplicas, 0) == 0 {
+			return fmt.Sprintf("Waiting for %s %s to have a ready pod", w.Kind, w.Name)
+		}
+	}
+	return ""
 }
 
 // llmConnectionDetails resolves how to reach a Ready model based on its expose

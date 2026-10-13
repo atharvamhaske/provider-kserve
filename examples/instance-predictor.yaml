@@ -48,3 +48,5 @@ spec:
         maxReplicas: 3
         # runtimeVersion: "v2"
         # runtime: kserve-sklearnserver
+        # ClusterStorageContainer that downloads the model (default: matched by URI).
+        # storageContainer: default
