@@ -1,0 +1,19 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-catalog
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      parameters:
+        model: sklearn-iris
