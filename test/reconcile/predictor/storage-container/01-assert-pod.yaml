@@ -1,0 +1,13 @@
+# KServe's pod webhook injects the storage-initializer at admission, so the
+# pod spec shows which ClusterStorageContainer was used before the model
+# downloads or the pod even schedules.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    serving.kserve.io/inferenceservice: test-predictor-csc
+spec:
+  (initContainers[?name == 'storage-initializer']):
+    - resources:
+        limits:
+          memory: 2Gi

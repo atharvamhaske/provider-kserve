@@ -3,11 +3,17 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"slices"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+
+	kservev1alpha2 "github.com/kserve/kserve/pkg/apis/serving/v1alpha2"
 
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
@@ -332,15 +338,61 @@ func TestBuildLLMInferenceServiceScaling(t *testing.T) {
 	})
 }
 
+func TestBuildLLMInferenceServicePodLabels(t *testing.T) {
+	t.Parallel()
+	c := llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{EnablePrefill: true})
+	got, err := buildLLMInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		controller.ProviderLabel:  common.ProviderName,
+		controller.InstanceLabel:  "llama",
+		controller.ComponentLabel: common.ComponentLlmEngine,
+	}
+	if !maps.Equal(got.Spec.Labels, want) {
+		t.Fatalf("decode pod labels = %v, want %v", got.Spec.Labels, want)
+	}
+	if got.Spec.Prefill == nil || !maps.Equal(got.Spec.Prefill.Labels, want) {
+		t.Fatalf("prefill pod labels = %#v, want %v", got.Spec.Prefill, want)
+	}
+	if !slices.Equal(c.LabelledComponents(), []string{common.ComponentLlmEngine}) {
+		t.Fatalf("labelled components = %v, want [%s]", c.LabelledComponents(), common.ComponentLlmEngine)
+	}
+}
+
 func TestValidateLLMScaling(t *testing.T) {
 	t.Parallel()
 
 	t.Run("valid decode scaling", func(t *testing.T) {
 		t.Parallel()
-		if err := validateLLM(llmContext(t, ptr.To(int32(1)), components.VllmCustomSpec{
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
 			MaxReplicas: ptr.To(int32(4)),
 		}, llm.LlmTopologyParameters{})); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	t.Run("decode replicas with scaling", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContext(t, ptr.To(int32(2)), components.VllmCustomSpec{
+			MaxReplicas: ptr.To(int32(4)),
+		}, llm.LlmTopologyParameters{}))
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("prefill replicas with scaling", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{
+			EnablePrefill:      true,
+			PrefillReplicas:    ptr.To(int32(3)),
+			PrefillMaxReplicas: ptr.To(int32(6)),
+		}))
+		if err == nil {
+			t.Fatal("expected error")
 		}
 	})
 
@@ -368,4 +420,538 @@ func TestValidateLLMScaling(t *testing.T) {
 			t.Fatal("expected actuator mismatch error")
 		}
 	})
+}
+
+func llmContextWithResources(t *testing.T, replicas *int32, res *corev1.ResourceRequirements, params components.VllmCustomSpec, topo llm.LlmTopologyParameters) *controller.Context {
+	t.Helper()
+	c := llmContext(t, replicas, params, topo)
+	comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
+	comp.Resources = res
+	c.Instance().Spec.Components[common.ComponentLlmEngine] = comp
+	return c
+}
+
+func gpuResources(n string) *corev1.ResourceRequirements {
+	return &corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{nvidiaGPUResource: resource.MustParse(n)},
+	}
+}
+
+func TestValidateWorkerGroup(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		count        *int32
+		pp           *int32
+		resourcesSet bool
+		wantErr      bool
+	}{
+		{name: "unset"},
+		{name: "valid", count: ptr.To(int32(1)), pp: ptr.To(int32(2))},
+		{name: "resources without count", resourcesSet: true, wantErr: true},
+		{name: "missing pp", count: ptr.To(int32(1)), wantErr: true},
+		{name: "mismatch", count: ptr.To(int32(1)), pp: ptr.To(int32(4)), wantErr: true},
+		{name: "zero count", count: ptr.To(int32(0)), pp: ptr.To(int32(1)), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateWorkerGroup(tc.count, tc.pp, tc.resourcesSet, "workerCount", "pipelineParallelSize", "workerResources")
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateTensorGPU(t *testing.T) {
+	t.Parallel()
+	if err := validateTensorGPU(nil, ptr.To(int32(8)), false, "res"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTensorGPU(gpuResources("8"), ptr.To(int32(8)), false, "res"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTensorGPU(gpuResources("1"), ptr.To(int32(8)), false, "res"); err == nil {
+		t.Fatal("expected GPU < TP error")
+	}
+	if err := validateTensorGPU(gpuResources("1"), ptr.To(int32(8)), true, "res"); err != nil {
+		t.Fatal(err)
+	}
+	// Limits govern scheduling; requests-only GPU is not compared to tensorParallelSize.
+	if err := validateTensorGPU(&corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{nvidiaGPUResource: resource.MustParse("1")},
+	}, ptr.To(int32(8)), false, "res"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateLLMWorkers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid decode workers", func(t *testing.T) {
+		t.Parallel()
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{})); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("pp alone ok", func(t *testing.T) {
+		t.Parallel()
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{})); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("gpu vs tp", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContextWithResources(t, nil, gpuResources("1"), components.VllmCustomSpec{
+			TensorParallelSize: ptr.To(int32(8)),
+		}, llm.LlmTopologyParameters{}))
+		if err == nil {
+			t.Fatal("expected GPU/TP error")
+		}
+	})
+
+	t.Run("prefill workers need enablePrefill", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{
+			PrefillWorkerCount:          ptr.To(int32(1)),
+			PrefillPipelineParallelSize: ptr.To(int32(2)),
+		}))
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("prefill PP-only without enablePrefill is ignored", func(t *testing.T) {
+		t.Parallel()
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{
+			PrefillPipelineParallelSize: ptr.To(int32(2)),
+		})); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("cpu profile skips GPU vs TP", func(t *testing.T) {
+		t.Parallel()
+		if err := validateLLM(llmContextWithResources(t, nil, gpuResources("1"), components.VllmCustomSpec{
+			ComputeProfile:     "cpu",
+			TensorParallelSize: ptr.To(int32(8)),
+		}, llm.LlmTopologyParameters{})); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("UI worker CPU keeps head GPU for TP check", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContextWithResources(t, nil, gpuResources("1"), components.VllmCustomSpec{
+			TensorParallelSize:   ptr.To(int32(8)),
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+			WorkerResources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			},
+		}, llm.LlmTopologyParameters{}))
+		if err == nil {
+			t.Fatal("expected GPU/TP error on overlaid worker resources")
+		}
+	})
+}
+
+func TestBuildLLMInferenceServiceWorkers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("pp alone does not set worker", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Worker != nil {
+			t.Fatalf("worker = %#v, want nil", got.Spec.Worker)
+		}
+	})
+
+	t.Run("workerCount sets spec.worker and copies head resources", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContextWithResources(t, nil, gpuResources("2"), components.VllmCustomSpec{
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Worker == nil || len(got.Spec.Worker.Containers) != 1 {
+			t.Fatalf("worker = %#v", got.Spec.Worker)
+		}
+		q := got.Spec.Worker.Containers[0].Resources.Limits[nvidiaGPUResource]
+		if q.Value() != 2 {
+			t.Fatalf("copied GPU = %s", q.String())
+		}
+	})
+
+	t.Run("prefill workers", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContextWithResources(t, nil, gpuResources("2"), components.VllmCustomSpec{
+			TensorParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{
+			EnablePrefill:               true,
+			PrefillWorkerCount:          ptr.To(int32(1)),
+			PrefillPipelineParallelSize: ptr.To(int32(2)),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Prefill == nil || got.Spec.Prefill.Worker == nil {
+			t.Fatalf("prefill.worker = %#v", got.Spec.Prefill)
+		}
+		if got.Spec.Prefill.Parallelism == nil || got.Spec.Prefill.Parallelism.Pipeline == nil || *got.Spec.Prefill.Parallelism.Pipeline != 2 {
+			t.Fatalf("prefill parallelism = %#v", got.Spec.Prefill.Parallelism)
+		}
+		if got.Spec.Prefill.Parallelism.Tensor != nil {
+			t.Fatal("prefill must not copy decode tensorParallelSize")
+		}
+		if got.Spec.Prefill.Template == nil || len(got.Spec.Prefill.Template.Containers) != 1 {
+			t.Fatalf("prefill template = %#v", got.Spec.Prefill.Template)
+		}
+	})
+
+	t.Run("worker overlay keeps head GPU", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContextWithResources(t, nil, gpuResources("2"), components.VllmCustomSpec{
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+			WorkerResources: &corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")},
+			},
+		}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := got.Spec.Worker.Containers[0].Resources
+		gpu := res.Limits[nvidiaGPUResource]
+		cpu := res.Limits[corev1.ResourceCPU]
+		if gpu.Value() != 2 {
+			t.Fatalf("GPU = %s, want 2 from head", gpu.String())
+		}
+		if cpu.Cmp(resource.MustParse("4")) != 0 {
+			t.Fatalf("CPU = %s", cpu.String())
+		}
+	})
+}
+
+func TestBuildLLMInferenceServiceGPULibraryPath(t *testing.T) {
+	t.Parallel()
+
+	hasLibraryPath := func(c corev1.Container) bool {
+		for _, e := range c.Env {
+			if e.Name == "LIBRARY_PATH" && e.Value == "/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64" {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("gpu decode sets LIBRARY_PATH", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template == nil || len(got.Spec.Template.Containers) != 1 {
+			t.Fatalf("template = %#v", got.Spec.Template)
+		}
+		if !hasLibraryPath(got.Spec.Template.Containers[0]) {
+			t.Fatalf("gpu main missing LIBRARY_PATH: %#v", got.Spec.Template.Containers[0].Env)
+		}
+	})
+
+	t.Run("cpu profile omits LIBRARY_PATH", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{
+			ComputeProfile: "cpu",
+		}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template != nil {
+			for _, c := range got.Spec.Template.Containers {
+				if hasLibraryPath(c) {
+					t.Fatalf("cpu profile should not set LIBRARY_PATH: %#v", c.Env)
+				}
+			}
+		}
+	})
+
+	t.Run("gpu worker and prefill set LIBRARY_PATH", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContextWithResources(t, nil, gpuResources("2"), components.VllmCustomSpec{
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{
+			EnablePrefill:               true,
+			PrefillWorkerCount:          ptr.To(int32(1)),
+			PrefillPipelineParallelSize: ptr.To(int32(2)),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Worker == nil || !hasLibraryPath(got.Spec.Worker.Containers[0]) {
+			t.Fatalf("worker missing LIBRARY_PATH: %#v", got.Spec.Worker)
+		}
+		if got.Spec.Prefill == nil || got.Spec.Prefill.Template == nil || !hasLibraryPath(got.Spec.Prefill.Template.Containers[0]) {
+			t.Fatalf("prefill main missing LIBRARY_PATH: %#v", got.Spec.Prefill)
+		}
+		if got.Spec.Prefill.Worker == nil || !hasLibraryPath(got.Spec.Prefill.Worker.Containers[0]) {
+			t.Fatalf("prefill worker missing LIBRARY_PATH: %#v", got.Spec.Prefill.Worker)
+		}
+	})
+}
+
+func TestBuildLLMInferenceServiceGPUCount(t *testing.T) {
+	t.Parallel()
+
+	gpuLimit := func(c corev1.Container) int64 {
+		q := c.Resources.Limits[nvidiaGPUResource]
+		return q.Value()
+	}
+
+	t.Run("gpu profile defaults to 1 gpu", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template == nil || gpuLimit(got.Spec.Template.Containers[0]) != 1 {
+			t.Fatalf("main gpu = %#v, want 1", got.Spec.Template)
+		}
+	})
+
+	t.Run("gpuCount sets head, worker and prefill", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{
+			GpuCount:             ptr.To(int32(4)),
+			WorkerCount:          ptr.To(int32(1)),
+			PipelineParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{
+			EnablePrefill:               true,
+			PrefillWorkerCount:          ptr.To(int32(1)),
+			PrefillPipelineParallelSize: ptr.To(int32(2)),
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gpuLimit(got.Spec.Template.Containers[0]) != 4 {
+			t.Fatalf("head gpu = %d, want 4", gpuLimit(got.Spec.Template.Containers[0]))
+		}
+		if got.Spec.Worker == nil || gpuLimit(got.Spec.Worker.Containers[0]) != 4 {
+			t.Fatalf("worker gpu = %#v, want 4", got.Spec.Worker)
+		}
+		if got.Spec.Prefill == nil || got.Spec.Prefill.Template == nil || gpuLimit(got.Spec.Prefill.Template.Containers[0]) != 4 {
+			t.Fatalf("prefill gpu = %#v, want 4", got.Spec.Prefill)
+		}
+		if got.Spec.Prefill.Worker == nil || gpuLimit(got.Spec.Prefill.Worker.Containers[0]) != 4 {
+			t.Fatalf("prefill worker gpu = %#v, want 4", got.Spec.Prefill.Worker)
+		}
+	})
+
+	t.Run("cpu profile sets no gpu", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{
+			ComputeProfile: "cpu",
+		}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template != nil {
+			if _, ok := got.Spec.Template.Containers[0].Resources.Limits[nvidiaGPUResource]; ok {
+				t.Fatal("cpu profile must not request a GPU")
+			}
+		}
+	})
+}
+
+func TestValidateLLMGpuCount(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gpuCount on cpu profile errors", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
+			ComputeProfile: "cpu",
+			GpuCount:       ptr.To(int32(1)),
+		}, llm.LlmTopologyParameters{}))
+		if err == nil {
+			t.Fatal("expected error for gpuCount on cpu profile")
+		}
+	})
+
+	t.Run("gpuCount below tensorParallelSize errors", func(t *testing.T) {
+		t.Parallel()
+		err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
+			GpuCount:           ptr.To(int32(1)),
+			TensorParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{}))
+		if err == nil {
+			t.Fatal("expected GPU/TP error")
+		}
+	})
+
+	t.Run("gpuCount meets tensorParallelSize", func(t *testing.T) {
+		t.Parallel()
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{
+			GpuCount:           ptr.To(int32(2)),
+			TensorParallelSize: ptr.To(int32(2)),
+		}, llm.LlmTopologyParameters{})); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestApplyStorageInitializerResources(t *testing.T) {
+	t.Parallel()
+
+	res := &corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+	}
+	storageInit := func(pod *corev1.PodSpec) *corev1.Container {
+		if pod == nil {
+			return nil
+		}
+		for i := range pod.InitContainers {
+			if pod.InitContainers[i].Name == "storage-initializer" {
+				return &pod.InitContainers[i]
+			}
+		}
+		return nil
+	}
+
+	tests := []struct {
+		name     string
+		params   components.VllmCustomSpec
+		res      *corev1.ResourceRequirements
+		prefill  bool
+		wantInit bool
+	}{
+		{name: "hf model", params: components.VllmCustomSpec{ModelURI: "hf://org/model"}, res: res, wantInit: true},
+		{name: "s3 model with prefill", params: components.VllmCustomSpec{ModelURI: "s3://bucket/model"}, res: res, prefill: true, wantInit: true},
+		{name: "not configured", params: components.VllmCustomSpec{ModelURI: "hf://org/model"}},
+		{name: "pvc model", params: components.VllmCustomSpec{ModelURI: "pvc://claim/model"}, res: res},
+		{name: "oci model", params: components.VllmCustomSpec{ModelURI: "oci://registry/model"}, res: res},
+		{name: "storage initializer disabled", params: components.VllmCustomSpec{ModelURI: "hf://org/model", DisableStorageInitializer: ptr.To(true)}, res: res},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spec := kservev1alpha2.LLMInferenceServiceSpec{}
+			spec.Template = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
+			spec.Worker = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}
+			if tt.prefill {
+				spec.Prefill = &kservev1alpha2.WorkloadSpec{}
+			}
+			applyStorageInitializerResources(&spec, tt.params, tt.res)
+
+			pods := []*corev1.PodSpec{spec.Template, spec.Worker}
+			if tt.prefill {
+				pods = append(pods, spec.Prefill.Template)
+			}
+			for _, pod := range pods {
+				got := storageInit(pod)
+				if !tt.wantInit {
+					if got != nil {
+						t.Fatalf("unexpected storage-initializer override: %#v", got)
+					}
+					continue
+				}
+				if got == nil {
+					t.Fatalf("missing storage-initializer override in %#v", pod)
+				}
+				if mem := got.Resources.Limits[corev1.ResourceMemory]; mem.Cmp(resource.MustParse("4Gi")) != 0 {
+					t.Fatalf("memory limit = %s, want 4Gi", mem.String())
+				}
+			}
+		})
+	}
+}
+
+func TestBuildLLMInferenceServiceRolloutStrategy(t *testing.T) {
+	t.Parallel()
+
+	noSurge := func(t *testing.T, rs *kservev1alpha2.RolloutStrategy) {
+		t.Helper()
+		if rs == nil || rs.MaxSurge == nil || rs.MaxSurge.IntValue() != 0 ||
+			rs.MaxUnavailable == nil || rs.MaxUnavailable.IntValue() != 1 {
+			t.Fatalf("rolloutStrategy = %#v, want maxSurge 0, maxUnavailable 1", rs)
+		}
+	}
+
+	t.Run("gpu decode and prefill never surge", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{EnablePrefill: true}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		noSurge(t, got.Spec.RolloutStrategy)
+		noSurge(t, got.Spec.Prefill.RolloutStrategy)
+	})
+
+	t.Run("cpu profile keeps the default strategy", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{ComputeProfile: "cpu"}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.RolloutStrategy != nil {
+			t.Fatalf("cpu rolloutStrategy = %#v, want nil", got.Spec.RolloutStrategy)
+		}
+	})
+}
+
+func TestUnservedWorkload(t *testing.T) {
+	t.Parallel()
+	observed := func(kind, name string, ready *int32) *kservev1alpha2.ObservedWorkloadStatus {
+		return &kservev1alpha2.ObservedWorkloadStatus{
+			TypedLocalObjectReference: corev1.TypedLocalObjectReference{Kind: kind, Name: name},
+			ReadyReplicas:             ready,
+		}
+	}
+	tests := []struct {
+		name string
+		ws   *kservev1alpha2.WorkloadStatus
+		want string
+	}{
+		{name: "no workload status trusts Ready", ws: nil, want: ""},
+		{name: "primary has a ready pod", ws: &kservev1alpha2.WorkloadStatus{
+			Primary: observed("Deployment", "m-kserve", ptr.To[int32](1)),
+		}, want: ""},
+		{name: "primary has no ready pod", ws: &kservev1alpha2.WorkloadStatus{
+			Primary: observed("Deployment", "m-kserve", ptr.To[int32](0)),
+		}, want: "Waiting for Deployment m-kserve to have a ready pod"},
+		{name: "primary not observed yet", ws: &kservev1alpha2.WorkloadStatus{
+			Primary: observed("LeaderWorkerSet", "m-kserve-mn", nil),
+		}, want: "Waiting for LeaderWorkerSet m-kserve-mn to have a ready pod"},
+		{name: "prefill has no ready pod", ws: &kservev1alpha2.WorkloadStatus{
+			Primary: observed("Deployment", "m-kserve", ptr.To[int32](1)),
+			Prefill: observed("Deployment", "m-kserve-prefill", ptr.To[int32](0)),
+		}, want: "Waiting for Deployment m-kserve-prefill to have a ready pod"},
+		{name: "scheduler is not a model workload", ws: &kservev1alpha2.WorkloadStatus{
+			Primary:   observed("Deployment", "m-kserve", ptr.To[int32](1)),
+			Scheduler: observed("Deployment", "m-kserve-router-scheduler", ptr.To[int32](0)),
+		}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := unservedWorkload(tt.ws); got != tt.want {
+				t.Fatalf("unservedWorkload() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }

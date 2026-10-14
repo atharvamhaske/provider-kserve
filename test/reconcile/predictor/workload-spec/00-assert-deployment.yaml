@@ -1,0 +1,21 @@
+# KServe merges the runtime's own args with ours, so only check ours is there.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-predictor-workload-predictor
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+      (tolerations[?key == 'dedicated']):
+        - value: inference
+          effect: NoSchedule
+      (topologySpreadConstraints[?topologyKey == 'kubernetes.io/hostname']):
+        - labelSelector:
+            matchLabels:
+              core.openeverest.io/instance: test-predictor-workload
+      (containers[?name == 'kserve-container']):
+        - (env[?name == 'OMP_NUM_THREADS']):
+            - value: "1"
+          (contains(args, '--workers=1')): true

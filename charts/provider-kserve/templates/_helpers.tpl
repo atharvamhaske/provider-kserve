@@ -80,8 +80,8 @@ Names for the optional shared Envoy AI Gateway resources.
 {{- printf "%s-ai-gateway" (include "provider-kserve.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "provider-kserve.aiGatewayReaderBindingName" -}}
-{{- printf "%s-ai-gateway-pool-reader" (include "provider-kserve.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- define "provider-kserve.aiGatewayPoolReaderName" -}}
+{{- printf "%s-ai-gateway-inference-pool-reader" (include "provider-kserve.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "provider-kserve.aiGatewayTLSSecretName" -}}
@@ -94,4 +94,8 @@ Names for the optional shared Envoy AI Gateway resources.
 
 {{- define "provider-kserve.aiGatewayPort" -}}
 {{- if .Values.aiGateway.tls.enabled }}443{{ else }}{{ .Values.aiGateway.listener.port }}{{ end }}
+{{- end }}
+
+{{- define "provider-kserve.aiGatewayListenerName" -}}
+{{- if .Values.aiGateway.tls.enabled }}https{{ else }}{{ .Values.aiGateway.scheme }}{{ end }}
 {{- end }}

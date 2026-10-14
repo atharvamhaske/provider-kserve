@@ -1,0 +1,9 @@
+# Validation errors requeue with backoff, so the Instance reconciles once the
+# referenced ClusterStorageContainer appears.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: test-predictor-csc-missing
+spec:
+  predictor:
+    storageContainerName: chainsaw-predictor-init-late

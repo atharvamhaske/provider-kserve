@@ -73,6 +73,13 @@ type VllmCustomSpec struct {
 	// CUDA presets. This is a convenience over setting baseRefs directly.
 	ComputeProfile string `json:"computeProfile,omitempty"`
 
+	// GpuCount is the number of GPUs (nvidia.com/gpu) each vLLM pod requests
+	// (head and every worker). The GPU presets carry no GPU limit, so the provider
+	// injects this into the model container's resource limits; without it the pod
+	// schedules onto any node and vLLM fails to find a device. Defaults to 1 on
+	// the GPU profile. Leave unset for the CPU profile. Must be >= tensorParallelSize.
+	GpuCount *int32 `json:"gpuCount,omitempty"`
+
 	// KVCacheSpaceGi overrides VLLM_CPU_KVCACHE_SPACE (GiB) for the CPU profile.
 	// Left unset, vLLM auto-sizes the KV cache from the memory that is free at
 	// startup (recommended), which adapts to the node. Set it only to cap the KV
@@ -129,6 +136,16 @@ type VllmCustomSpec struct {
 	// ScalingActuator selects the WVA actuator backend: "keda" (default) or "hpa".
 	// KEDA queries Prometheus directly; HPA needs a Prometheus Adapter.
 	ScalingActuator string `json:"scalingActuator,omitempty"`
+
+	// WorkerCount is the number of extra worker pods besides the head for a
+	// pipeline-parallel multi-node model. Presence turns on
+	// LLMInferenceService.spec.worker. Must equal pipelineParallelSize - 1.
+	// PipelineParallelSize alone does not create workers.
+	WorkerCount *int32 `json:"workerCount,omitempty"`
+
+	// WorkerResources are optional CPU/memory/GPU requests for worker pods.
+	// Unset copies llmEngine.resources. Setting this without WorkerCount is an error.
+	WorkerResources *corev1.ResourceRequirements `json:"workerResources,omitempty"`
 }
 
 const (
@@ -173,24 +190,37 @@ type ModelServerCustomSpec struct {
 	// MaxReplicas is the autoscaling ceiling.
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
-	// ServiceAccountName is the ServiceAccount the predictor pods run as.
-	// Empty keeps the cluster default.
+	// StorageContainer names a ClusterStorageContainer. When set, KServe uses
+	// that initializer instead of matching on the storage URI scheme
+	// (spec.predictor.storageContainerName), e.g. one with a larger memory limit
+	// for big models. It must exist, be enabled, and support StorageURI.
+	StorageContainer string `json:"storageContainer,omitempty"`
+
+	// Env is added to the model server container (e.g. OMP_NUM_THREADS, or
+	// HF_TOKEN from a Secret via valueFrom).
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Args is appended to the serving runtime's arguments (e.g.
+	// --task=text_embedding for the huggingface runtime).
+	Args []string `json:"args,omitempty"`
+
+	// ServiceAccountName is the ServiceAccount the predictor pods run as (e.g.
+	// one bound to cloud IAM for model downloads). Empty uses the namespace
+	// default.
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
-	// Labels are merged onto the InferenceService and copied to
-	// spec.predictor.labels so KServe stamps them on predictor pods
-	// (kserve/kserve@v0.20.0 components/predictor.go).
+	// Labels are added to the InferenceService; KServe copies them to the
+	// predictor pods. Keys the provider manages are rejected.
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Annotations are merged onto the InferenceService and copied to
-	// spec.predictor.annotations so KServe stamps them on predictor pods.
+	// Annotations are added to the InferenceService; KServe copies them to
+	// the predictor pods. serving.kserve.io/deploymentMode is rejected.
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// SecurityContext is the pod-level security context
-	// (spec.predictor.securityContext).
+	// SecurityContext is the predictor pod's security context.
 	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
 
-	// ContainerSecurityContext is the kserve-container security context
-	// (spec.predictor.model.securityContext).
+	// ContainerSecurityContext is the model server container's security
+	// context.
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }

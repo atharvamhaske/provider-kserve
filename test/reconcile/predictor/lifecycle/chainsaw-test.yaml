@@ -2,7 +2,7 @@
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
-  name: predictor
+  name: predictor-lifecycle
 spec:
   description: |
     Lifecycle of a predictor Instance: create it, verify the provider derives a
