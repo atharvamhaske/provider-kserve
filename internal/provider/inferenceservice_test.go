@@ -10,14 +10,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	commonv1alpha1 "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
 	"github.com/openeverest/provider-kserve/definition/components"
+	"github.com/openeverest/provider-kserve/definition/topologies/predictor"
 	"github.com/openeverest/provider-kserve/internal/common"
 )
 
@@ -49,8 +52,8 @@ func TestBuildInferenceService(t *testing.T) {
 				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
 			},
 			Parameters: rawJSON(t, components.ModelServerCustomSpec{
-				ModelFormat:    "sklearn",
-				StorageURI:     "gs://bucket/iris",
+				ModelFormat:      "sklearn",
+				StorageURI:       "gs://bucket/iris",
 				Runtime:          "kserve-sklearnserver",
 				RuntimeVersion:   "1.5",
 				MaxReplicas:      ptr.To(int32(4)),
@@ -108,6 +111,125 @@ func TestBuildInferenceService(t *testing.T) {
 			t.Fatalf("spec = %#v\nwant %#v", isvc.Object["spec"], want)
 		}
 	})
+
+	t.Run("maps env, args and the scheduling policy", func(t *testing.T) {
+		zone := corev1.NodeSelectorRequirement{Key: corev1.LabelTopologyZone, Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}}
+		policy := &commonv1alpha1.SchedulingPolicy{
+			SchedulerName: "custom-scheduler",
+			NodeSelector:  map[string]string{"pool": "inference"},
+			Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{zone}}},
+				},
+			}},
+			Tolerations: []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "inference", Effect: corev1.TaintEffectNoSchedule}},
+			TopologySpreadConstraints: &[]corev1.TopologySpreadConstraint{{
+				MaxSkew: 1, TopologyKey: corev1.LabelHostname, WhenUnsatisfiable: corev1.ScheduleAnyway,
+			}},
+		}
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			SchedulingPolicy: policy,
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{
+				ModelFormat: "huggingface",
+				Env:         []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}},
+				Args:        []string{"--task=text_embedding"},
+			}),
+		})
+
+		isvc, err := buildInferenceService(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var spec inferenceServiceSpec
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(isvc.Object["spec"].(map[string]any), &spec); err != nil {
+			t.Fatal(err)
+		}
+		got := spec.Predictor
+		if !reflect.DeepEqual(got.Model.Env, []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}}) || !reflect.DeepEqual(got.Model.Args, []string{"--task=text_embedding"}) {
+			t.Fatalf("env = %v, args = %v", got.Model.Env, got.Model.Args)
+		}
+		if got.SchedulerName != policy.SchedulerName || !reflect.DeepEqual(got.NodeSelector, policy.NodeSelector) ||
+			!reflect.DeepEqual(got.Affinity, policy.Affinity) || !reflect.DeepEqual(got.Tolerations, policy.Tolerations) {
+			t.Fatalf("scheduling = %+v", got)
+		}
+		if len(got.TopologySpreadConstraints) != 1 || got.TopologySpreadConstraints[0].LabelSelector == nil ||
+			!reflect.DeepEqual(got.TopologySpreadConstraints[0].LabelSelector.MatchLabels, got.Labels) {
+			t.Fatalf("topology spread constraints = %+v, want selector on the predictor pod labels %v", got.TopologySpreadConstraints, got.Labels)
+		}
+	})
+}
+
+func TestValidatePredictorExternalAccess(t *testing.T) {
+	cases := []struct {
+		name    string
+		topo    predictor.PredictorTopologyParameters
+		service *corev1alpha1.Service
+		wantErr bool
+	}{
+		{name: "defaults"},
+		{name: "load balancer", topo: predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessLoadBalancer}},
+		{name: "node port service type", service: &corev1alpha1.Service{ServiceType: corev1.ServiceTypeNodePort}},
+		{name: "unknown externalAccess", topo: predictor.PredictorTopologyParameters{ExternalAccess: "Ingress"}, wantErr: true},
+		{name: "external name service type", service: &corev1alpha1.Service{ServiceType: corev1.ServiceTypeExternalName}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+				Service:    tc.service,
+				Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}),
+			})
+			c.Instance().Spec.Topology.Parameters = rawJSON(t, tc.topo)
+			if err := validatePredictor(c); (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPredictorServiceType(t *testing.T) {
+	cases := []struct {
+		name    string
+		topo    predictor.PredictorTopologyParameters
+		service *corev1alpha1.Service
+		want    corev1.ServiceType
+	}{
+		{name: "defaults to ClusterIP", want: corev1.ServiceTypeClusterIP},
+		{name: "component service type", service: &corev1alpha1.Service{ServiceType: corev1.ServiceTypeNodePort}, want: corev1.ServiceTypeNodePort},
+		{
+			name:    "externalAccess wins over the component service type",
+			topo:    predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessClusterIP},
+			service: &corev1alpha1.Service{ServiceType: corev1.ServiceTypeLoadBalancer},
+			want:    corev1.ServiceTypeClusterIP,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := predictorContext(t, nil, corev1alpha1.ComponentSpec{Service: tc.service})
+			c.Instance().Spec.Topology.Parameters = rawJSON(t, tc.topo)
+			if got := predictorServiceType(c); got != tc.want {
+				t.Fatalf("service type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildPredictorExternalService(t *testing.T) {
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{})
+	spec := &corev1alpha1.Service{Annotations: map[string]string{"service.beta.kubernetes.io/linode-loadbalancer-throttle": "5"}}
+	svc := buildExternalService(c, spec, corev1.ServiceTypeLoadBalancer, c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
+
+	if svc.Name != "iris-external" || svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("service %s type %s", svc.Name, svc.Spec.Type)
+	}
+	if !reflect.DeepEqual(svc.Spec.Selector, c.PodLabels(common.ComponentPredictor)) {
+		t.Fatalf("selector = %v", svc.Spec.Selector)
+	}
+	if p := svc.Spec.Ports; len(p) != 1 || p[0].Port != 80 || p[0].TargetPort.IntVal != 8080 {
+		t.Fatalf("ports = %+v, want 80 -> 8080", p)
+	}
+	if svc.Annotations["service.beta.kubernetes.io/linode-loadbalancer-throttle"] != "5" {
+		t.Fatalf("annotations = %v", svc.Annotations)
+	}
 }
 
 func TestValidatePredictorStorageContainer(t *testing.T) {
@@ -186,8 +308,8 @@ func TestValidatePredictorStorageContainer(t *testing.T) {
 			name:             "local model download job",
 			storageContainer: "s3-init",
 			storageURI:       "s3://bucket/model",
-			objs:    []client.Object{storageContainer("s3-init", setWorkloadType("localModelDownloadJob"))},
-			wantErr: `predictor.parameters.storageContainer: ClusterStorageContainer "s3-init" has workloadType "localModelDownloadJob", want "initContainer"`,
+			objs:             []client.Object{storageContainer("s3-init", setWorkloadType("localModelDownloadJob"))},
+			wantErr:          `predictor.parameters.storageContainer: ClusterStorageContainer "s3-init" has workloadType "localModelDownloadJob", want "initContainer"`,
 		},
 		{
 			name:             "unsupported URI",
@@ -230,9 +352,23 @@ func TestStatusPredictor(t *testing.T) {
 	comp := corev1alpha1.ComponentSpec{
 		Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn"}),
 	}
+	readyStatus := map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}
+	externalService := func(mut func(*corev1.Service)) *corev1.Service {
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "iris-external", Namespace: "ns"}}
+		mut(svc)
+		return svc
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+		Status: corev1.NodeStatus{Addresses: []corev1.NodeAddress{
+			{Type: corev1.NodeInternalIP, Address: "10.0.0.5"},
+			{Type: corev1.NodeExternalIP, Address: "203.0.113.5"},
+		}},
+	}
 
 	cases := []struct {
 		name      string
+		topo      predictor.PredictorTopologyParameters
 		objs      []client.Object
 		wantPhase corev1alpha1.InstancePhase
 		wantURI   string
@@ -249,19 +385,62 @@ func TestStatusPredictor(t *testing.T) {
 			wantPhase: corev1alpha1.InstancePhaseProvisioning,
 		},
 		{
-			name: "ready with URL publishes connection details",
+			name: "ready publishes the in-cluster address, not the ingress-domain URL",
 			objs: []client.Object{isvcWithStatus(map[string]any{
 				"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-				"url":        "https://iris.example.com",
+				"url":        "http://iris-ns.example.com",
+				"address":    map[string]any{"url": "http://iris-predictor.ns.svc.cluster.local"},
 			})},
 			wantPhase: corev1alpha1.InstancePhaseReady,
-			wantURI:   "https://iris.example.com",
+			wantURI:   "http://iris-predictor.ns.svc.cluster.local",
+		},
+		{
+			name:      "ready without URL falls back to the in-cluster predictor Service",
+			objs:      []client.Object{isvcWithStatus(readyStatus)},
+			wantPhase: corev1alpha1.InstancePhaseReady,
+			wantURI:   "http://iris-predictor.ns.svc.cluster.local:80",
+		},
+		{
+			name:      "load balancer publishes its ingress address",
+			topo:      predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessLoadBalancer},
+			wantPhase: corev1alpha1.InstancePhaseReady,
+			objs: []client.Object{
+				isvcWithStatus(map[string]any{
+					"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
+					"url":        "http://iris-ns.example.com",
+				}),
+				externalService(func(s *corev1.Service) {
+					s.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{{IP: "198.51.100.7"}}
+				}),
+			},
+			wantURI: "http://198.51.100.7:80",
+		},
+		{
+			name:      "pending load balancer is ready without connection details",
+			topo:      predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessLoadBalancer},
+			objs:      []client.Object{isvcWithStatus(readyStatus), externalService(func(*corev1.Service) {})},
+			wantPhase: corev1alpha1.InstancePhaseReady,
+		},
+		{
+			name:      "node port pairs a node address with the allocated port",
+			topo:      predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessNodePort},
+			wantPhase: corev1alpha1.InstancePhaseReady,
+			objs: []client.Object{
+				isvcWithStatus(readyStatus),
+				node,
+				externalService(func(s *corev1.Service) {
+					s.Spec.Ports = []corev1.ServicePort{{Port: 80, NodePort: 31080}}
+				}),
+			},
+			wantURI: "http://203.0.113.5:31080",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cl := fake.NewClientBuilder().WithObjects(tc.objs...).Build()
-			got, err := (&Provider{}).statusPredictor(predictorContext(t, cl, comp))
+			c := predictorContext(t, cl, comp)
+			c.Instance().Spec.Topology.Parameters = rawJSON(t, tc.topo)
+			got, err := (&Provider{}).statusPredictor(c)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -195,4 +195,12 @@ type ModelServerCustomSpec struct {
 	// (spec.predictor.storageContainerName), e.g. one with a larger memory limit
 	// for big models. It must exist, be enabled, and support StorageURI.
 	StorageContainer string `json:"storageContainer,omitempty"`
+
+	// Env is added to the model server container (e.g. OMP_NUM_THREADS, or
+	// HF_TOKEN from a Secret via valueFrom).
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Args is appended to the serving runtime's arguments (e.g.
+	// --task=text_embedding for the huggingface runtime).
+	Args []string `json:"args,omitempty"`
 }

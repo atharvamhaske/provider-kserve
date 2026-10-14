@@ -25,6 +25,8 @@ spec:
   # Topology configuration — predictive model serving.
   topology:
     type: predictor
+    # parameters:
+    #   externalAccess: LoadBalancer   # ClusterIP (default) | LoadBalancer | NodePort
 
   components:
     # Model server (required).
@@ -50,3 +52,16 @@ spec:
         # runtime: kserve-sklearnserver
         # ClusterStorageContainer that downloads the model (default: matched by URI).
         # storageContainer: default
+        # env:
+        #   - name: OMP_NUM_THREADS
+        #     value: "1"
+        # args:
+        #   - --strict-model-config=false
+      # schedulingPolicy:
+      #   nodeSelector:
+      #     kubernetes.io/os: linux
+      #   tolerations:
+      #     - key: dedicated
+      #       operator: Equal
+      #       value: inference
+      #       effect: NoSchedule

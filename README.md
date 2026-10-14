@@ -259,6 +259,21 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `minReplicas` | int32 | Autoscaling floor (`0` enables scale-to-zero). |
 | `maxReplicas` | int32 | Autoscaling ceiling. |
 | `storageContainer` | string | `ClusterStorageContainer` that downloads the model (`spec.predictor.storageContainerName`). Empty lets KServe match one on the URI scheme. Validation fails if it is missing, disabled, or does not support `storageURI`. |
+| `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
+| `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
+
+`spec.components.predictor.schedulingPolicy` (scheduler name, node selector, affinity,
+tolerations, topology spread constraints) is applied to the predictor pods.
+
+### `predictor` topology parameters
+
+| Field | Type | Description |
+|---|---|---|
+| `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, or `NodePort`. Takes precedence over `predictor.service.serviceType`. |
+
+With `LoadBalancer` or `NodePort` the provider creates `<instance>-external` (port 80 → 8080)
+and publishes its address as the connection details. With `ClusterIP` they point at KServe's
+in-cluster `<instance>-predictor` Service.
 
 ### `llm` topology parameters
 
