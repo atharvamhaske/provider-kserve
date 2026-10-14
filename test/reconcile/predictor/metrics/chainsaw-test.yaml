@@ -1,0 +1,38 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-metrics
+spec:
+  description: |
+    topology.parameters.enableMetrics (on by default) emits a PodMonitor for
+    the predictor pods that scrapes the port and path the serving runtime
+    declares in its prometheus.kserve.io annotations; turning it off removes
+    the PodMonitor.
+
+    The PodMonitor CRD is installed if the cluster does not have it yet (the
+    Tilt CI cluster runs without the Prometheus Operator).
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice,podmonitor -o yaml
+  steps:
+    - name: podmonitor-crd
+      try:
+        - script:
+            content: |
+              kubectl get crd podmonitors.monitoring.coreos.com >/dev/null 2>&1 && exit 0
+              kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.94.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
+              kubectl wait --for=condition=Established crd/podmonitors.monitoring.coreos.com --timeout=60s
+
+    - name: enabled-by-default
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-podmonitor.yaml
+
+    - name: disabled
+      try:
+        - apply:
+            file: 10-instance-disabled.yaml
+        - error:
+            file: 10-errors.yaml
