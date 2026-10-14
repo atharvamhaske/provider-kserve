@@ -263,6 +263,10 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
 | `task` | string | Hugging Face runtime task (`--task`), e.g. `text_embedding`. Only with `modelFormat: huggingface`; a `--task` in `args` wins. |
+| `gpuCount` | int32 | GPUs (`nvidia.com/gpu`) per predictor pod. Unset takes the catalog entry's value; `0` runs on CPU. |
+
+Resource requests default to the limits: otherwise KServe fills in the serving runtime's
+requests (2Gi memory for most runtimes), which a lower limit would make invalid.
 
 `spec.components.predictor.schedulingPolicy` (scheduler name, node selector, affinity,
 tolerations, topology spread constraints) is applied to the predictor pods.
@@ -287,9 +291,22 @@ an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
 - Set `task: text_embedding` for sentence-embedding models, or pick an embedding model from
   the catalog (`model: all-minilm-l6-v2`).
 - The chart's `predictorModels` value is the catalog behind the UI model picker; its first
-  entry is the form default. Entries name a `modelFormat`, `storageURI` and optional `task`.
-- Without a GPU in `resources`, the provider adds `--backend=huggingface`: the runtime's
-  default picks vLLM, which does not start on CPU. An explicit `--backend` is kept.
+  entry is the form default. Entries name a `modelFormat`, `storageURI`, optional `task` and
+  optional `gpuCount`. The default catalog has CPU embedding models (all-MiniLM-L6-v2,
+  all-mpnet-base-v2, multilingual E5 small/base), GPU embedding models (Qwen3-Embedding
+  0.6B/4B, BGE-M3), DistilBERT SST-2, and KServe's sklearn, XGBoost, LightGBM and TensorFlow
+  example models.
+- Without a GPU, the provider adds `--backend=huggingface`: the runtime's default picks vLLM,
+  which does not start on CPU. An explicit `--backend` is kept. This backend always
+  mean-pools token embeddings, so only mean-pooled models (see the model's
+  `1_Pooling/config.json`) give correct vectors on CPU. CLS- or last-token-pooled models
+  (BGE, Qwen3-Embedding, mxbai, Snowflake Arctic) return wrong vectors there: run them
+  with `gpuCount`.
+- With a GPU the runtime serves through vLLM, which reads the model's pooling config. For
+  `task: text_embedding` the provider adds `--runner=pooling`, without which vLLM serves
+  decoder-based embedding models such as Qwen3-Embedding as text generators.
+- E5 models expect `query: ` / `passage: ` prefixes, and Qwen3-Embedding an instruction
+  prefix on queries; see their model cards.
 - With `huggingface.tokenSecretName` set, `hf://` predictors use the same token
   ServiceAccount as `llm` Instances, for gated models.
 
@@ -646,9 +663,11 @@ external address across different environments:
 
 ### Model pods: downloads and rollouts
 
-`storageInitializer.resources` (chart value, default `{}` = KServe's 1 CPU / 1Gi) sets the
-resources of the init container that downloads `hf://` / `s3://` models for every `llm`
-Instance. Raise the memory limit when multi-GB downloads are OOM-killed.
+`storageInitializer.resources` (chart value, default 4Gi memory limit; KServe's own default
+is 1 CPU / 1Gi) sets the resources of the init container that downloads `hf://` / `s3://`
+models for every `llm` Instance, and of the bundled `default` ClusterStorageContainer that
+downloads `predictor` models. Raise the memory limit when multi-GB downloads are OOM-killed;
+at 1Gi a 1.2 GB model already is.
 
 GPU `llm` Instances roll out with `rolloutStrategy: {maxSurge: 0, maxUnavailable: 1}`: pods are
 replaced one at a time without a surge pod, which would wait for a GPU still held by the pod it

@@ -5,8 +5,9 @@ metadata:
 spec:
   description: |
     parameters.model picks an entry from the chart's predictorModels catalog,
-    which fills in the model format and storage URI. A name that is not in the
-    catalog fails validation.
+    which fills in the model format and storage URI. A GPU entry also requests
+    a GPU and has vLLM pool embeddings. A name that is not in the catalog fails
+    validation.
   catch:
     - script:
         content: kubectl -n $NAMESPACE get instance,inferenceservice -o yaml
@@ -24,3 +25,10 @@ spec:
             file: 10-instance-unknown.yaml
         - assert:
             file: 10-assert-failed.yaml
+
+    - name: gpu-catalog-model
+      try:
+        - apply:
+            file: 20-instance-gpu.yaml
+        - assert:
+            file: 20-assert-isvc-gpu.yaml

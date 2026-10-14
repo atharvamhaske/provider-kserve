@@ -16,6 +16,7 @@ type PredictorModelCatalogEntry struct {
 	ModelFormat string `json:"modelFormat"`
 	StorageURI  string `json:"storageURI"`
 	Task        string `json:"task,omitempty"`
+	GpuCount    int32  `json:"gpuCount,omitempty"`
 }
 
 var (

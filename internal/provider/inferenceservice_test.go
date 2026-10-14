@@ -83,7 +83,11 @@ func TestBuildInferenceService(t *testing.T) {
 					"runtime":        "kserve-sklearnserver",
 					"storageUri":     "gs://bucket/iris",
 					"runtimeVersion": "1.5",
-					"resources":      map[string]any{"limits": map[string]any{"memory": "1Gi"}},
+					// Requests default to limits so the runtime's 2Gi request cannot exceed them.
+					"resources": map[string]any{
+						"limits":   map[string]any{"memory": "1Gi"},
+						"requests": map[string]any{"memory": "1Gi"},
+					},
 				},
 			},
 		}
@@ -472,7 +476,10 @@ func TestPredictorArgs(t *testing.T) {
 		{name: "no resources counts as CPU", format: "huggingface", want: []string{"--backend=huggingface"}},
 		{name: "huggingface on GPU keeps the runtime default", format: "huggingface", res: gpu},
 		{name: "explicit backend is kept", format: "huggingface", args: []string{"--backend=vllm"}, res: cpu, want: []string{"--backend=vllm"}},
-		{name: "task parameter becomes the first flag", format: "huggingface", task: "text_embedding", args: []string{"--max_length=256"}, res: gpu, want: []string{"--task=text_embedding", "--max_length=256"}},
+		{name: "task parameter becomes the first flag", format: "huggingface", task: "text_embedding", args: []string{"--max_length=256"}, res: gpu, want: []string{"--task=text_embedding", "--max_length=256", "--runner=pooling"}},
+		{name: "embeddings on CPU need no runner", format: "huggingface", task: "text_embedding", res: cpu, want: []string{"--task=text_embedding", "--backend=huggingface"}},
+		{name: "explicit runner is kept", format: "huggingface", task: "text_embedding", args: []string{"--runner=generate"}, res: gpu, want: []string{"--task=text_embedding", "--runner=generate"}},
+		{name: "other GPU tasks need no runner", format: "huggingface", task: "sequence_classification", res: gpu, want: []string{"--task=sequence_classification"}},
 		{name: "task in args wins over the parameter", format: "huggingface", task: "text_embedding", args: []string{"--task", "fill_mask"}, res: gpu, want: []string{"--task", "fill_mask"}},
 		{name: "other formats are untouched", format: "sklearn", args: []string{"--workers=1"}, res: cpu, want: []string{"--workers=1"}},
 	}
@@ -501,6 +508,7 @@ func predictorCatalogEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PREDICTOR_MODEL_CATALOG", `[
 		{"label":"MiniLM","name":"minilm","modelFormat":"huggingface","storageURI":"hf://sentence-transformers/all-MiniLM-L6-v2","task":"text_embedding"},
+		{"label":"Qwen3 Embedding","name":"qwen3-embedding","modelFormat":"huggingface","storageURI":"hf://Qwen/Qwen3-Embedding-0.6B","task":"text_embedding","gpuCount":1},
 		{"label":"Iris","name":"iris","modelFormat":"sklearn","storageURI":"gs://bucket/iris"}
 	]`)
 	common.ResetPredictorCatalogForTest()
@@ -524,6 +532,16 @@ func TestResolveCatalogModel(t *testing.T) {
 			name: "explicit task wins",
 			in:   components.ModelServerCustomSpec{Model: "minilm", Task: "fill_mask"},
 			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "huggingface", StorageURI: "hf://sentence-transformers/all-MiniLM-L6-v2", Task: "fill_mask"},
+		},
+		{
+			name: "GPU catalog entry sets gpuCount",
+			in:   components.ModelServerCustomSpec{Model: "qwen3-embedding"},
+			want: components.ModelServerCustomSpec{Model: "qwen3-embedding", ModelFormat: "huggingface", StorageURI: "hf://Qwen/Qwen3-Embedding-0.6B", Task: "text_embedding", GpuCount: ptr.To(int32(1))},
+		},
+		{
+			name: "explicit gpuCount wins",
+			in:   components.ModelServerCustomSpec{Model: "qwen3-embedding", GpuCount: ptr.To(int32(0))},
+			want: components.ModelServerCustomSpec{Model: "qwen3-embedding", ModelFormat: "huggingface", StorageURI: "hf://Qwen/Qwen3-Embedding-0.6B", Task: "text_embedding", GpuCount: ptr.To(int32(0))},
 		},
 		{
 			name: "custom format and URI ignore the catalog",
@@ -582,6 +600,42 @@ func TestBuildInferenceServiceFromCatalog(t *testing.T) {
 	}
 	if !reflect.DeepEqual(model, want) {
 		t.Fatalf("model = %#v\nwant %#v", model, want)
+	}
+}
+
+func TestBuildInferenceServiceGPUCatalogModel(t *testing.T) {
+	predictorCatalogEnv(t)
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+		Resources:  &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")}},
+		Parameters: rawJSON(t, components.ModelServerCustomSpec{Model: "qwen3-embedding"}),
+	})
+	isvc, err := buildInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _, _ := unstructured.NestedMap(isvc.Object, "spec", "predictor", "model")
+	want := map[string]any{
+		"modelFormat": map[string]any{"name": "huggingface"},
+		"storageUri":  "hf://Qwen/Qwen3-Embedding-0.6B",
+		"resources": map[string]any{
+			"limits":   map[string]any{"memory": "16Gi", "nvidia.com/gpu": "1"},
+			"requests": map[string]any{"memory": "16Gi", "nvidia.com/gpu": "1"},
+		},
+		"args": []any{"--task=text_embedding", "--runner=pooling"},
+	}
+	if !reflect.DeepEqual(model, want) {
+		t.Fatalf("model = %#v\nwant %#v", model, want)
+	}
+}
+
+func TestValidatePredictorGPUCount(t *testing.T) {
+	for count, wantErr := range map[int32]bool{0: false, 2: false, -1: true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", GpuCount: ptr.To(count)}),
+		})
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%d: err = %v, wantErr %t", count, err, wantErr)
+		}
 	}
 }
 

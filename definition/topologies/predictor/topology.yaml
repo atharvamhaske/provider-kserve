@@ -157,7 +157,7 @@ ui:
       - storageContainer
     resources:
       label: Resources
-      description: CPU and memory for each model server pod.
+      description: CPU, memory and GPUs for each model server pod.
       components:
         resources:
           uiType: group
@@ -185,6 +185,19 @@ ui:
               validation:
                 min: 1
                 required: true
+            gpuCount:
+              uiType: number
+              # A plain parameter: the nvidia.com/gpu resource key cannot be
+              # written as a form path.
+              path: spec.components.predictor.parameters.gpuCount
+              fieldParams:
+                label: GPUs
+                placeholder: From the model
+                step: 1
+              validation:
+                min: 0
+                max: 8
+                int: true
       componentsOrder:
       - resources
     scaling:

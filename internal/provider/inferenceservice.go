@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -77,6 +78,7 @@ const (
 	predictorContainerPort = 8080
 
 	huggingFaceModelFormat = "huggingface"
+	textEmbeddingTask      = "text_embedding"
 )
 
 // KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
@@ -149,6 +151,9 @@ func validatePredictor(c *controller.Context) error {
 	}
 	if params.MinReplicas != nil && *params.MinReplicas < 0 {
 		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
+	}
+	if params.GpuCount != nil && *params.GpuCount < 0 {
+		return fmt.Errorf("%s.parameters.gpuCount must not be negative", common.ComponentPredictor)
 	}
 	if params.Task != "" && !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
 		return fmt.Errorf("%s.parameters.task is only supported with modelFormat %q", common.ComponentPredictor, huggingFaceModelFormat)
@@ -228,14 +233,15 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
 	}
 
+	resources := predictorResources(comp.Resources, params.GpuCount)
 	predictor := predictorSpec{Model: &modelSpec{
 		ModelFormat:    modelFormat{Name: params.ModelFormat},
 		Runtime:        params.Runtime,
 		StorageURI:     params.StorageURI,
 		RuntimeVersion: params.RuntimeVersion,
-		Resources:      comp.Resources,
+		Resources:      resources,
 		Env:            params.Env,
-		Args:           predictorArgs(params, comp.Resources),
+		Args:           predictorArgs(params, resources),
 	}}
 	predictor.Labels = c.PodLabels(common.ComponentPredictor)
 	if policy := comp.SchedulingPolicy; policy != nil {
@@ -282,17 +288,25 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 // predictorArgs adds the huggingface runtime flags the provider manages to the
 // user's args: --task from the task parameter, and the transformers backend
 // when no GPU is requested (the runtime otherwise picks vLLM, which fails to
-// start without one). Flags the user passed explicitly win.
+// start without one). On a GPU the runtime uses vLLM, which ignores --task and
+// serves decoder-based embedding models (e.g. Qwen3-Embedding) as text
+// generators unless told to pool. Flags the user passed explicitly win.
 func predictorArgs(params components.ModelServerCustomSpec, res *corev1.ResourceRequirements) []string {
 	if !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
 		return params.Args
 	}
 	args := slices.Clone(params.Args)
+	embedding := false
 	if params.Task != "" && !hasFlag(args, "--task") {
 		args = append([]string{"--task=" + params.Task}, args...)
+		embedding = params.Task == textEmbeddingTask
 	}
-	if !requestsGPU(res) && !hasFlag(args, "--backend") {
+	gpu := requestsGPU(res)
+	if !gpu && !hasFlag(args, "--backend") {
 		args = append(args, "--backend=huggingface")
+	}
+	if gpu && embedding && !hasFlag(args, "--runner") {
+		args = append(args, "--runner=pooling")
 	}
 	return args
 }
@@ -341,7 +355,40 @@ func resolveCatalogModel(params components.ModelServerCustomSpec) (components.Mo
 	if params.Task == "" {
 		params.Task = entry.Task
 	}
+	if params.GpuCount == nil && entry.GpuCount > 0 {
+		params.GpuCount = &entry.GpuCount
+	}
 	return params, nil
+}
+
+// predictorResources adds the nvidia.com/gpu limit for gpuCount (the UI cannot
+// write that resource key directly) and defaults each missing request to its
+// limit. Without that KServe fills in the serving runtime's requests (2Gi
+// memory for most), and a lower limit makes the Deployment invalid.
+func predictorResources(res *corev1.ResourceRequirements, gpuCount *int32) *corev1.ResourceRequirements {
+	gpu := gpuCount != nil && *gpuCount > 0
+	if res == nil && !gpu {
+		return nil
+	}
+	out := &corev1.ResourceRequirements{}
+	if res != nil {
+		out = res.DeepCopy()
+	}
+	if gpu {
+		if out.Limits == nil {
+			out.Limits = corev1.ResourceList{}
+		}
+		out.Limits[nvidiaGPUResource] = *resource.NewQuantity(int64(*gpuCount), resource.DecimalSI)
+	}
+	for name, limit := range out.Limits {
+		if out.Requests == nil {
+			out.Requests = corev1.ResourceList{}
+		}
+		if _, ok := out.Requests[name]; !ok {
+			out.Requests[name] = limit
+		}
+	}
+	return out
 }
 
 // syncPredictor creates or updates the InferenceService and the optional

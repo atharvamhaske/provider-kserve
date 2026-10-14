@@ -1,0 +1,33 @@
+# Example Instance CR for the provider-kserve provider: Qwen3-Embedding-0.6B on
+# one GPU through the predictor topology. On a GPU the KServe Hugging Face
+# runtime serves the model with vLLM; the provider adds --runner=pooling for
+# task text_embedding. Picking the catalog entry (`model: qwen3-embedding-0.6b`)
+# sets the same fields, gpuCount included.
+#
+# Call it with the address from the Instance's connection Secret:
+#   curl -X POST http://<host>:<port>/openai/v1/embeddings \
+#     -H 'Content-Type: application/json' \
+#     -d '{"model": "qwen3-embedding", "input": ["hello world"]}'
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: qwen3-embedding
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      parameters:
+        modelFormat: huggingface
+        storageURI: hf://Qwen/Qwen3-Embedding-0.6B
+        task: text_embedding
+        gpuCount: 1

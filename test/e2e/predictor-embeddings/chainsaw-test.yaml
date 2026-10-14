@@ -6,8 +6,8 @@ spec:
   description: |
     Serve a small sentence-embedding model on CPU through the huggingface
     runtime: the Instance becomes Ready, its connection Secret names the model
-    and the in-cluster address, and /openai/v1/embeddings returns a 384-d
-    vector for that model.
+    and the in-cluster address, and /openai/v1/embeddings returns the same
+    384-d vectors as sentence-transformers for that model.
   catch:
     - script:
         content: |
@@ -23,6 +23,8 @@ spec:
 
     - name: embed-through-connection-details
       try:
+        - apply:
+            file: 01-reference.yaml
         - script:
             content: |
               set -eu
@@ -30,13 +32,12 @@ spec:
               uri=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.uri}' | base64 -d)
               model=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.model}' | base64 -d)
               # Read the result from pod logs: `kubectl run -i` can echo stdout twice.
-              kubectl -n "$NAMESPACE" run embed --restart=Never --quiet \
-                --image=curlimages/curl:8.11.1 -- \
-                curl -sf -X POST "$uri/openai/v1/embeddings" \
-                -H 'Content-Type: application/json' \
-                -d "{\"model\":\"$model\",\"input\":[\"hello world\"]}" >/dev/null
-              kubectl -n "$NAMESPACE" wait pod/embed --for=jsonpath='{.status.phase}'=Succeeded --timeout=2m >/dev/null
+              # --overrides replaces the container, so the endpoint goes in as arguments.
+              kubectl -n "$NAMESPACE" run embed --restart=Never --quiet --image=python:3.12-slim \
+                --overrides="{\"spec\":{\"volumes\":[{\"name\":\"ref\",\"configMap\":{\"name\":\"embedding-reference\"}}],\"containers\":[{\"name\":\"embed\",\"image\":\"python:3.12-slim\",\"command\":[\"python\",\"/ref/check.py\",\"$uri\",\"$model\"],\"volumeMounts\":[{\"name\":\"ref\",\"mountPath\":\"/ref\"}]}]}}" >/dev/null
+              kubectl -n "$NAMESPACE" wait pod/embed --for=jsonpath='{.status.phase}'=Succeeded --timeout=3m >/dev/null
               kubectl -n "$NAMESPACE" logs embed
             check:
               ($error): ~
-              (length(json_parse($stdout).data[0].embedding)): 384
+              (json_parse($stdout).dim): 384
+              (json_parse($stdout).minCosine > `0.999`): true

@@ -190,6 +190,9 @@ spec:
                     type: object
                 type: object
               type: array
+            gpuCount:
+              format: int32
+              type: integer
             maxReplicas:
               format: int32
               type: integer
@@ -956,6 +959,17 @@ spec:
                   validation:
                     min: 0.5
                     required: true
+                gpuCount:
+                  fieldParams:
+                    label: GPUs
+                    placeholder: From the model
+                    step: 1
+                  path: spec.components.predictor.parameters.gpuCount
+                  uiType: number
+                  validation:
+                    int: true
+                    max: 8
+                    min: 0
                 memory:
                   fieldParams:
                     badge: Gi
@@ -972,7 +986,7 @@ spec:
               uiType: group
           componentsOrder:
             - resources
-          description: CPU and memory for each model server pod.
+          description: CPU, memory and GPUs for each model server pod.
           label: Resources
         routing:
           components:

@@ -215,4 +215,8 @@ type ModelServerCustomSpec struct {
 	// model config. Only valid with modelFormat huggingface; a --task in Args
 	// wins.
 	Task string `json:"task,omitempty"`
+
+	// GpuCount is the number of GPUs (nvidia.com/gpu) each predictor pod
+	// requests. Unset takes the catalog entry's value; 0 runs on CPU.
+	GpuCount *int32 `json:"gpuCount,omitempty"`
 }
