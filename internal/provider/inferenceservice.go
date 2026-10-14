@@ -3,14 +3,18 @@ package provider
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
@@ -30,10 +34,11 @@ type inferenceServiceSpec struct {
 }
 
 type predictorSpec struct {
-	MinReplicas *int32            `json:"minReplicas,omitempty"`
-	MaxReplicas int32             `json:"maxReplicas,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Model       *modelSpec        `json:"model,omitempty"`
+	MinReplicas          *int32            `json:"minReplicas,omitempty"`
+	MaxReplicas          int32             `json:"maxReplicas,omitempty"`
+	Labels               map[string]string `json:"labels,omitempty"`
+	StorageContainerName string            `json:"storageContainerName,omitempty"`
+	Model                *modelSpec        `json:"model,omitempty"`
 }
 
 type modelSpec struct {
@@ -53,6 +58,50 @@ type inferenceServiceStatus struct {
 	URL           *apis.URL `json:"url,omitempty"`
 }
 
+// KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
+// ClusterStorageContainer fields validation reads are mirrored here too.
+var clusterStorageContainerGVK = schema.GroupVersionKind{
+	Group: "serving.kserve.io", Version: "v1alpha1", Kind: "ClusterStorageContainer",
+}
+
+const storageContainerWorkloadInitContainer = "initContainer"
+
+type clusterStorageContainer struct {
+	Spec     storageContainerSpec `json:"spec"`
+	Disabled *bool                `json:"disabled,omitempty"`
+}
+
+type storageContainerSpec struct {
+	SupportedURIFormats []supportedURIFormat `json:"supportedUriFormats"`
+	WorkloadType        string               `json:"workloadType,omitempty"`
+}
+
+type supportedURIFormat struct {
+	Prefix string `json:"prefix,omitempty"`
+	Regex  string `json:"regex,omitempty"`
+}
+
+// supports mirrors KServe's StorageContainerSpec.IsStorageUriSupported.
+func (s storageContainerSpec) supports(uri string) (bool, error) {
+	for _, f := range s.SupportedURIFormats {
+		switch {
+		case f.Prefix != "":
+			if strings.HasPrefix(uri, f.Prefix) {
+				return true, nil
+			}
+		case f.Regex != "":
+			match, err := regexp.MatchString(f.Regex, uri)
+			if err != nil {
+				return false, err
+			}
+			if match {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // validatePredictor checks the Instance spec for the predictor topology.
 func validatePredictor(c *controller.Context) error {
 	comp, ok := c.Instance().Spec.Components[common.ComponentPredictor]
@@ -70,6 +119,48 @@ func validatePredictor(c *controller.Context) error {
 	}
 	if params.MinReplicas != nil && *params.MinReplicas < 0 {
 		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
+	}
+	if params.StorageContainer != "" {
+		if err := validateStorageContainer(c, params.StorageContainer, params.StorageURI); err != nil {
+			return fmt.Errorf("%s.parameters.storageContainer: %w", common.ComponentPredictor, err)
+		}
+	}
+	return nil
+}
+
+// validateStorageContainer mirrors the checks KServe's pod webhook runs on a
+// named ClusterStorageContainer; failing them there leaves the Instance stuck
+// provisioning with the error only in ReplicaSet events.
+func validateStorageContainer(c *controller.Context, name, storageURI string) error {
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("invalid name %q: %s", name, strings.Join(errs, "; "))
+	}
+
+	obj := unstructuredObject(clusterStorageContainerGVK)
+	if err := c.Client().Get(c.Context(), client.ObjectKey{Name: name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("ClusterStorageContainer %q not found", name)
+		}
+		return fmt.Errorf("getting ClusterStorageContainer %q: %w", name, err)
+	}
+	var csc clusterStorageContainer
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &csc); err != nil {
+		return fmt.Errorf("decoding ClusterStorageContainer %q: %w", name, err)
+	}
+
+	if csc.Disabled != nil && *csc.Disabled {
+		return fmt.Errorf("ClusterStorageContainer %q is disabled", name)
+	}
+	// KServe defaults an empty workloadType to initContainer.
+	if wt := csc.Spec.WorkloadType; wt != "" && wt != storageContainerWorkloadInitContainer {
+		return fmt.Errorf("ClusterStorageContainer %q has workloadType %q, want %q", name, wt, storageContainerWorkloadInitContainer)
+	}
+	supported, err := csc.Spec.supports(storageURI)
+	if err != nil {
+		return fmt.Errorf("ClusterStorageContainer %q: %w", name, err)
+	}
+	if !supported {
+		return fmt.Errorf("ClusterStorageContainer %q does not support storageURI %q", name, storageURI)
 	}
 	return nil
 }
@@ -103,6 +194,7 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	if params.MaxReplicas != nil {
 		predictor.MaxReplicas = *params.MaxReplicas
 	}
+	predictor.StorageContainerName = params.StorageContainer
 
 	meta := c.ObjectMeta(c.Name())
 	if meta.Annotations == nil {

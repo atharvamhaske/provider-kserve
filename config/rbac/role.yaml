@@ -139,6 +139,14 @@ rules:
 - apiGroups:
   - serving.kserve.io
   resources:
+  - clusterstoragecontainers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - serving.kserve.io
+  resources:
   - inferenceservices
   - llminferenceserviceconfigs
   - llminferenceservices

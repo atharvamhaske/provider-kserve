@@ -30,6 +30,8 @@ package provider
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices/status,verbs=get
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices/finalizers,verbs=update
+// Validation checks the ClusterStorageContainer a predictor names:
+// +kubebuilder:rbac:groups=serving.kserve.io,resources=clusterstoragecontainers,verbs=get;list;watch
 
 // Envoy AI Gateway resources used by the optional llm access path:
 // +kubebuilder:rbac:groups=aigateway.envoyproxy.io,resources=aigatewayroutes,verbs=get;list;watch;create;update;patch;delete

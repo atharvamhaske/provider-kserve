@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -50,9 +51,10 @@ func TestBuildInferenceService(t *testing.T) {
 			Parameters: rawJSON(t, components.ModelServerCustomSpec{
 				ModelFormat:    "sklearn",
 				StorageURI:     "gs://bucket/iris",
-				Runtime:        "kserve-sklearnserver",
-				RuntimeVersion: "1.5",
-				MaxReplicas:    ptr.To(int32(4)),
+				Runtime:          "kserve-sklearnserver",
+				RuntimeVersion:   "1.5",
+				MaxReplicas:      ptr.To(int32(4)),
+				StorageContainer: "large-model-init",
 			}),
 		})
 
@@ -69,9 +71,10 @@ func TestBuildInferenceService(t *testing.T) {
 
 		want := map[string]any{
 			"predictor": map[string]any{
-				"minReplicas": int64(2),
-				"maxReplicas": int64(4),
-				"labels":      predictorPodLabels(),
+				"minReplicas":          int64(2),
+				"maxReplicas":          int64(4),
+				"labels":               predictorPodLabels(),
+				"storageContainerName": "large-model-init",
 				"model": map[string]any{
 					"modelFormat":    map[string]any{"name": "sklearn"},
 					"runtime":        "kserve-sklearnserver",
@@ -105,6 +108,115 @@ func TestBuildInferenceService(t *testing.T) {
 			t.Fatalf("spec = %#v\nwant %#v", isvc.Object["spec"], want)
 		}
 	})
+}
+
+func TestValidatePredictorStorageContainer(t *testing.T) {
+	storageContainer := func(name string, mut func(map[string]any)) client.Object {
+		obj := unstructuredObject(clusterStorageContainerGVK)
+		obj.SetName(name)
+		spec := map[string]any{
+			"container": map[string]any{"name": "storage-initializer", "image": "kserve/storage-initializer"},
+			"supportedUriFormats": []any{
+				map[string]any{"prefix": "s3://"},
+				map[string]any{"regex": `https://(.+?)\.blob\.core\.windows\.net/(.+)`},
+			},
+			"workloadType": "initContainer",
+		}
+		obj.Object["spec"] = spec
+		if mut != nil {
+			mut(obj.Object)
+		}
+		return obj
+	}
+	setWorkloadType := func(wt string) func(map[string]any) {
+		return func(o map[string]any) { o["spec"].(map[string]any)["workloadType"] = wt }
+	}
+
+	cases := []struct {
+		name             string
+		storageContainer string
+		storageURI       string
+		objs             []client.Object
+		wantErr          string
+	}{
+		{
+			name:       "unset skips the lookup",
+			storageURI: "gs://bucket/model",
+		},
+		{
+			name:             "prefix match",
+			storageContainer: "s3-init",
+			storageURI:       "s3://bucket/model",
+			objs:             []client.Object{storageContainer("s3-init", nil)},
+		},
+		{
+			name:             "regex match",
+			storageContainer: "s3-init",
+			storageURI:       "https://acct.blob.core.windows.net/models/iris",
+			objs:             []client.Object{storageContainer("s3-init", nil)},
+		},
+		{
+			name:             "empty workloadType defaults to initContainer",
+			storageContainer: "s3-init",
+			storageURI:       "s3://bucket/model",
+			objs:             []client.Object{storageContainer("s3-init", setWorkloadType(""))},
+		},
+		{
+			name:             "invalid name",
+			storageContainer: "S3_Init",
+			storageURI:       "s3://bucket/model",
+			wantErr:          `predictor.parameters.storageContainer: invalid name "S3_Init"`,
+		},
+		{
+			name:             "not found",
+			storageContainer: "missing",
+			storageURI:       "s3://bucket/model",
+			wantErr:          `predictor.parameters.storageContainer: ClusterStorageContainer "missing" not found`,
+		},
+		{
+			name:             "disabled",
+			storageContainer: "s3-init",
+			storageURI:       "s3://bucket/model",
+			objs: []client.Object{storageContainer("s3-init", func(o map[string]any) {
+				o["disabled"] = true
+			})},
+			wantErr: `predictor.parameters.storageContainer: ClusterStorageContainer "s3-init" is disabled`,
+		},
+		{
+			name:             "local model download job",
+			storageContainer: "s3-init",
+			storageURI:       "s3://bucket/model",
+			objs:    []client.Object{storageContainer("s3-init", setWorkloadType("localModelDownloadJob"))},
+			wantErr: `predictor.parameters.storageContainer: ClusterStorageContainer "s3-init" has workloadType "localModelDownloadJob", want "initContainer"`,
+		},
+		{
+			name:             "unsupported URI",
+			storageContainer: "s3-init",
+			storageURI:       "gs://bucket/model",
+			objs:             []client.Object{storageContainer("s3-init", nil)},
+			wantErr:          `predictor.parameters.storageContainer: ClusterStorageContainer "s3-init" does not support storageURI "gs://bucket/model"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithObjects(tc.objs...).Build()
+			c := predictorContext(t, cl, corev1alpha1.ComponentSpec{
+				Parameters: rawJSON(t, components.ModelServerCustomSpec{
+					ModelFormat:      "sklearn",
+					StorageURI:       tc.storageURI,
+					StorageContainer: tc.storageContainer,
+				}),
+			})
+
+			err := validatePredictor(c)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.HasPrefix(err.Error(), tc.wantErr)):
+				t.Fatalf("error = %v, want prefix %q", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func TestStatusPredictor(t *testing.T) {
