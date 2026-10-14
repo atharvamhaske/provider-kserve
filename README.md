@@ -66,7 +66,7 @@ provider itself is covered under [Installation](#installation).
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.<name>.resources`; limits are mirrored into requests (Guaranteed QoS) |
 | Version upgrades | ✅ | of the deployed serving runtime version — change `spec.version`; see [Versions](#versions) |
 | Custom configuration | ✅ | structured parameters, plus an inline `LLMInferenceServiceConfig` escape hatch |
-| Monitoring | ✅ | a `PodMonitor` per `llm` Instance; gateway token/cost metrics when the AI Gateway is enabled |
+| Monitoring | ✅ | a `PodMonitor` per `llm` and `predictor` Instance; gateway token/cost metrics when the AI Gateway is enabled |
 | TLS | ✅ | optional HTTPS on the shared Envoy AI Gateway, issued by cert-manager |
 
 Models are pulled from the URI given in the component parameters (`hf://`, `s3://`, `gs://`,
@@ -252,8 +252,9 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 
 | Field | Type | Description |
 |---|---|---|
-| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required.** |
-| `storageURI` | string | Model artifacts location. **Required.** |
+| `model` | string | Name of a `predictorModels` catalog entry (the UI model picker). Supplies `modelFormat`, `storageURI` and `task`; ignored when `modelFormat` or `storageURI` is set. |
+| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required** unless `model` is set. |
+| `storageURI` | string | Model artifacts location. **Required** unless `model` is set. |
 | `runtimeVersion` | string | Pin the serving runtime version. |
 | `runtime` | string | Explicitly select a (Cluster)ServingRuntime by name. |
 | `minReplicas` | int32 | Autoscaling floor (`0` enables scale-to-zero). |
@@ -261,11 +262,16 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `storageContainer` | string | `ClusterStorageContainer` that downloads the model (`spec.predictor.storageContainerName`). Empty lets KServe match one on the URI scheme. Validation fails if it is missing, disabled, or does not support `storageURI`. |
 | `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
+| `task` | string | Hugging Face runtime task (`--task`), e.g. `text_embedding`. Only with `modelFormat: huggingface`; a `--task` in `args` wins. |
+| `gpuCount` | int32 | GPUs (`nvidia.com/gpu`) per predictor pod. Unset takes the catalog entry's value; `0` runs on CPU. |
 | `serviceAccountName` | string | ServiceAccount the predictor pods run as (e.g. one bound to cloud IAM). Empty uses the namespace default. |
 | `labels` | map | Added to the InferenceService; KServe copies them to the pods. Provider-managed keys are rejected. |
 | `annotations` | map | Added to the InferenceService; KServe copies them to the pods. `serving.kserve.io/deploymentMode` is rejected. |
 | `securityContext` | PodSecurityContext | Pod-level security context. |
 | `containerSecurityContext` | SecurityContext | Security context of the model server container. |
+
+Resource requests default to the limits: otherwise KServe fills in the serving runtime's
+requests (2Gi memory for most runtimes), which a lower limit would make invalid.
 
 `spec.components.predictor.schedulingPolicy` (scheduler name, node selector, affinity,
 tolerations, topology spread constraints) is applied to the predictor pods.
@@ -275,10 +281,40 @@ tolerations, topology spread constraints) is applied to the predictor pods.
 | Field | Type | Description |
 |---|---|---|
 | `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, or `NodePort`. Takes precedence over `predictor.service.serviceType`. |
+| `enableMetrics` | bool | Emit a PodMonitor for the predictor pods. Defaults to enabled. |
 
 With `LoadBalancer` or `NodePort` the provider creates `<instance>-external` (port 80 → 8080)
 and publishes its address as the connection details. With `ClusterIP` they point at KServe's
-in-cluster `<instance>-predictor` Service.
+in-cluster `<instance>-predictor` Service. The connection details also carry `model`, the name
+the model is served under (the Instance name).
+
+#### Embeddings
+
+`modelFormat: huggingface` serves Hub models through KServe's Hugging Face runtime, including
+an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
+[examples/instance-predictor-embeddings.yaml](examples/instance-predictor-embeddings.yaml).
+
+- Set `task: text_embedding` for sentence-embedding models, or pick an embedding model from
+  the catalog (`model: all-minilm-l6-v2`).
+- The chart's `predictorModels` value is the catalog behind the UI model picker; its first
+  entry is the form default. Entries name a `modelFormat`, `storageURI`, optional `task` and
+  optional `gpuCount`. The default catalog has CPU embedding models (all-MiniLM-L6-v2,
+  all-mpnet-base-v2, multilingual E5 small/base), GPU embedding models (Qwen3-Embedding
+  0.6B/4B, BGE-M3), DistilBERT SST-2, and KServe's sklearn, XGBoost, LightGBM and TensorFlow
+  example models.
+- Without a GPU, the provider adds `--backend=huggingface`: the runtime's default picks vLLM,
+  which does not start on CPU. An explicit `--backend` is kept. This backend always
+  mean-pools token embeddings, so only mean-pooled models (see the model's
+  `1_Pooling/config.json`) give correct vectors on CPU. CLS- or last-token-pooled models
+  (BGE, Qwen3-Embedding, mxbai, Snowflake Arctic) return wrong vectors there: run them
+  with `gpuCount`.
+- With a GPU the runtime serves through vLLM, which reads the model's pooling config. For
+  `task: text_embedding` the provider adds `--runner=pooling`, without which vLLM serves
+  decoder-based embedding models such as Qwen3-Embedding as text generators.
+- E5 models expect `query: ` / `passage: ` prefixes, and Qwen3-Embedding an instruction
+  prefix on queries; see their model cards.
+- With `huggingface.tokenSecretName` set, `hf://` predictors use the same token
+  ServiceAccount as `llm` Instances, for gated models.
 
 ### `llm` topology parameters
 
@@ -633,9 +669,11 @@ external address across different environments:
 
 ### Model pods: downloads and rollouts
 
-`storageInitializer.resources` (chart value, default `{}` = KServe's 1 CPU / 1Gi) sets the
-resources of the init container that downloads `hf://` / `s3://` models for every `llm`
-Instance. Raise the memory limit when multi-GB downloads are OOM-killed.
+`storageInitializer.resources` (chart value, default 4Gi memory limit; KServe's own default
+is 1 CPU / 1Gi) sets the resources of the init container that downloads `hf://` / `s3://`
+models for every `llm` Instance, and of the bundled `default` ClusterStorageContainer that
+downloads `predictor` models. Raise the memory limit when multi-GB downloads are OOM-killed;
+at 1Gi a 1.2 GB model already is.
 
 GPU `llm` Instances roll out with `rolloutStrategy: {maxSurge: 0, maxUnavailable: 1}`: pods are
 replaced one at a time without a surge pod, which would wait for a GPU still held by the pod it
@@ -644,8 +682,10 @@ replaces. With one replica this means a short outage per rollout.
 ### Observability
 
 Each `llm` Instance gets a `PodMonitor` so an existing Prometheus Operator scrapes vLLM's
-`:8000/metrics` (on by default; safely skipped when the `monitoring.coreos.com` CRDs are
-absent). See [docs/observability.md](docs/observability.md) and the
+`:8000/metrics`. Each `predictor` Instance gets one for the metrics port and path the serving
+runtime declares (`:8080/metrics` for most, Triton `:8002`, TorchServe `:8082`). Both are on by
+default and safely skipped when the `monitoring.coreos.com`
+CRDs are absent. See [docs/observability.md](docs/observability.md) and the
 [vLLM Grafana dashboard](docs/dashboards/vllm.json).
 
 When the AI Gateway is enabled, the chart also scrapes gateway `gen_ai.*` token/cost metrics.

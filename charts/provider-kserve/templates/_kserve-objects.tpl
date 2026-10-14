@@ -65,6 +65,10 @@ spec:
 {{- end }}
 {{- if .Values.kserveResources.enabled }}
 ---
-{{ .Files.Get "files/kserve/clusterstoragecontainer.yaml" }}
+{{- $csc := .Files.Get "files/kserve/clusterstoragecontainer.yaml" | fromYaml }}
+{{- with .Values.storageInitializer.resources }}
+{{- $_ := set $csc.spec.container "resources" (mergeOverwrite (deepCopy $csc.spec.container.resources) .) }}
+{{- end }}
+{{ toYaml $csc }}
 {{- end }}
 {{- end }}

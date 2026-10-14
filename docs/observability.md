@@ -19,9 +19,12 @@ aggregate.
 ## How it works
 
 When `metrics.podMonitor.enabled` is on (the default), the provider creates one
-`PodMonitor` (`monitoring.coreos.com/v1`) per `llm` Instance, owned by that
-Instance. The Prometheus Operator turns that `PodMonitor` into a scrape job; the
-existing Prometheus then scrapes the vLLM `:8000/metrics` endpoint directly.
+`PodMonitor` (`monitoring.coreos.com/v1`) per Instance, owned by that Instance.
+The Prometheus Operator turns that `PodMonitor` into a scrape job. `llm`
+scrapes vLLM `:8000/metrics`; `predictor` scrapes the port and path the serving
+runtime declares in its `prometheus.kserve.io/port` and `/path` annotations,
+which KServe copies onto the predictor pods (`:8080/metrics` for most runtimes,
+Triton `:8002`, TorchServe `:8082`).
 
 ```mermaid
 flowchart TB
@@ -101,11 +104,12 @@ Other gotchas:
 - **Namespace rule** → a `PodMonitor` (default `namespaceSelector`) matches only
   pods in **its own** namespace; the provider places it alongside the workload,
   which is correct.
-- **Port** → hardcoded to `8000` (the vLLM OpenAI server port, which also serves
-  `/metrics`). A different runtime port is a parameter to `buildPodMonitor`.
-- **Orphans on disable** → flipping the flag off does not delete existing
-  `PodMonitor`s; they are harmless and garbage-collected when the Instance is
-  deleted.
+- **Port** → `8000` for `llm` (vLLM). For `predictor` the runtime's
+  `prometheus.kserve.io/port` annotation, falling back to `8080`; the
+  `PodMonitor` sets the target address by relabeling because KServe declares no
+  container ports on predictor pods, so a `targetPort` would match nothing.
+- **Disable** → turning the chart or instance flag off deletes the Instance's
+  `PodMonitor` on its next reconcile.
 - **Drift** → the `PodMonitor` is not watched (owning that watch would fail the
   manager on CRD-less clusters), so a manual edit/delete is corrected on the
   next periodic resync, not instantly.

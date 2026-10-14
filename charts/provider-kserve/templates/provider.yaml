@@ -30,6 +30,14 @@ metadata:
 {{- $_ := set $llm "modelCatalog" $catalog }}
 {{- $_ := set $llm "loraCatalog" $loraCatalog }}
 {{- $_ := set $uiSchema "llm" $llm }}
+{{- /* The predictor picker only needs label/name; the provider resolves the rest from PREDICTOR_MODEL_CATALOG. */}}
+{{- $predictorCatalog := list }}
+{{- range .Values.predictorModels }}
+{{- $predictorCatalog = append $predictorCatalog (dict "label" .label "name" .name) }}
+{{- end }}
+{{- with index $uiSchema "predictor" }}
+{{- $_ := set . "modelCatalog" $predictorCatalog }}
+{{- end }}
 {{- $_ := set $spec "uiSchema" $uiSchema }}
 spec:
   {{- $spec | toYaml | nindent 2 }}

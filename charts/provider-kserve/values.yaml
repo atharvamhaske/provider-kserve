@@ -251,6 +251,84 @@ loraAdapters:
     name: qwen2.5-0.5b-maestro
     uri: "hf://umsa-v1/maestro_Qwen2.5_0.5B_grupo1"
 
+# Models offered in the predictor topology model picker. The first entry is the
+# form's default. Each entry:
+#   label:       shown in the UI
+#   name:        stable key stored on the Instance (parameters.model)
+#   modelFormat: KServe model format (selects the serving runtime)
+#   storageURI:  model location (hf://, gs://, s3://, ...)
+#   task:        optional huggingface runtime task (--task)
+#   gpuCount:    optional GPUs per pod; GPU entries are served by vLLM
+# Without a GPU the huggingface runtime always mean-pools token embeddings, so
+# CPU embedding entries must be mean-pooled models (sentence-transformers'
+# 1_Pooling/config.json). CLS- or last-token-pooled models (BGE, Qwen3-Embedding,
+# mxbai, Snowflake Arctic) return wrong vectors on CPU; list them with gpuCount.
+# -- Models offered in the predictor topology model picker
+predictorModels:
+  # --- Text embeddings on CPU ---
+  - label: "all-MiniLM-L6-v2 (text embeddings, 384-d)"
+    name: all-minilm-l6-v2
+    modelFormat: huggingface
+    storageURI: "hf://sentence-transformers/all-MiniLM-L6-v2"
+    task: text_embedding
+  - label: "all-mpnet-base-v2 (text embeddings, 768-d)"
+    name: all-mpnet-base-v2
+    modelFormat: huggingface
+    storageURI: "hf://sentence-transformers/all-mpnet-base-v2"
+    task: text_embedding
+  - label: "Multilingual E5 small (text embeddings, 384-d)"
+    name: multilingual-e5-small
+    modelFormat: huggingface
+    storageURI: "hf://intfloat/multilingual-e5-small"
+    task: text_embedding
+  - label: "Multilingual E5 base (text embeddings, 768-d)"
+    name: multilingual-e5-base
+    modelFormat: huggingface
+    storageURI: "hf://intfloat/multilingual-e5-base"
+    task: text_embedding
+  # --- Text embeddings on GPU ---
+  - label: "Qwen3 Embedding 0.6B (text embeddings, 1024-d, GPU)"
+    name: qwen3-embedding-0.6b
+    modelFormat: huggingface
+    storageURI: "hf://Qwen/Qwen3-Embedding-0.6B"
+    task: text_embedding
+    gpuCount: 1
+  - label: "Qwen3 Embedding 4B (text embeddings, 2560-d, GPU)"
+    name: qwen3-embedding-4b
+    modelFormat: huggingface
+    storageURI: "hf://Qwen/Qwen3-Embedding-4B"
+    task: text_embedding
+    gpuCount: 1
+  - label: "BGE-M3 (multilingual text embeddings, 1024-d, GPU)"
+    name: bge-m3
+    modelFormat: huggingface
+    storageURI: "hf://BAAI/bge-m3"
+    task: text_embedding
+    gpuCount: 1
+  # --- Text classification ---
+  - label: "DistilBERT SST-2 (sentiment classification)"
+    name: distilbert-sst2
+    modelFormat: huggingface
+    storageURI: "hf://distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    task: sequence_classification
+  # --- Classic ML (KServe example models) ---
+  - label: "scikit-learn Iris (KServe example)"
+    name: sklearn-iris
+    modelFormat: sklearn
+    storageURI: "gs://kfserving-examples/models/sklearn/1.0/model"
+  - label: "XGBoost Iris (KServe example)"
+    name: xgboost-iris
+    modelFormat: xgboost
+    storageURI: "gs://kfserving-examples/models/xgboost/1.5/model"
+  - label: "LightGBM Iris (KServe example)"
+    name: lightgbm-iris
+    modelFormat: lightgbm
+    storageURI: "gs://kfserving-examples/models/lightgbm/iris"
+  - label: "TensorFlow Flowers (image classification, KServe example)"
+    name: tensorflow-flowers
+    modelFormat: tensorflow
+    storageURI: "gs://kfserving-examples/models/tensorflow/flowers"
+
 # ---------------------------------------------------------------------------
 # HuggingFace access for gated models.
 #
@@ -259,7 +337,8 @@ loraAdapters:
 # as the Instances:
 #   kubectl create secret generic hf-token --from-literal=HF_TOKEN=hf_xxx
 # Then set `tokenSecretName` to that secret's name. The provider attaches the
-# secret to a dedicated ServiceAccount on each llm workload so KServe's
+# secret to a dedicated ServiceAccount on each llm workload, and on predictor
+# Instances with an hf:// storageURI, so KServe's
 # storage-initializer authenticates the download. The secret MUST contain an
 # `HF_TOKEN` key. Leave empty to disable (only ungated models will download).
 huggingface:
@@ -268,18 +347,21 @@ huggingface:
 
 # KServe's storage-initializer is the init container that downloads hf:// and
 # s3:// models into every llm model pod. KServe caps it at 1 CPU / 1Gi memory,
-# which is OOM-killed on multi-GB downloads. Applies to all llm Instances.
+# which is OOM-killed on multi-GB downloads (already at 1.2 GB). Applies to all
+# llm Instances and, merged over its defaults, to the bundled `default`
+# ClusterStorageContainer that downloads predictor models.
 storageInitializer:
-  # -- Resources for the storage-initializer, for example
-  # `{limits: {memory: 4Gi, cpu: "2"}}`. Empty keeps KServe's defaults.
-  resources: {}
+  # -- Resources for the storage-initializer. Empty keeps KServe's defaults.
+  resources:
+    limits:
+      memory: 4Gi
 
 # Prometheus Operator metrics scraping. The provider ships no monitoring stack;
 # it only makes model workloads discoverable by an existing Prometheus Operator.
 metrics:
   podMonitor:
-    # -- Emit a PodMonitor per llm Instance so an existing Prometheus Operator
-    # scrapes the vLLM /metrics endpoint. Safe to leave on: if the
+    # -- Emit a PodMonitor per Instance so an existing Prometheus Operator
+    # scrapes the model /metrics endpoint. Safe to leave on: if the
     # monitoring.coreos.com CRDs are absent the provider skips it instead of
     # erroring. To actually collect metrics, a Prometheus must select this
     # PodMonitor (podMonitorSelector/namespaceSelector matching the Instance

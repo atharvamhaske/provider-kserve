@@ -11,6 +11,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -42,12 +43,12 @@ type predictorSpec struct {
 	MaxReplicas               int32                             `json:"maxReplicas,omitempty"`
 	Labels                    map[string]string                 `json:"labels,omitempty"`
 	StorageContainerName      string                            `json:"storageContainerName,omitempty"`
+	ServiceAccountName        string                            `json:"serviceAccountName,omitempty"`
 	SchedulerName             string                            `json:"schedulerName,omitempty"`
 	NodeSelector              map[string]string                 `json:"nodeSelector,omitempty"`
 	Affinity                  *corev1.Affinity                  `json:"affinity,omitempty"`
 	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
-	ServiceAccountName        string                            `json:"serviceAccountName,omitempty"`
 	SecurityContext           *corev1.PodSecurityContext        `json:"securityContext,omitempty"`
 	Model                     *modelSpec                        `json:"model,omitempty"`
 }
@@ -78,6 +79,9 @@ const (
 	// runtimes listen.
 	predictorServicePort   = 80
 	predictorContainerPort = 8080
+
+	huggingFaceModelFormat = "huggingface"
+	textEmbeddingTask      = "text_embedding"
 )
 
 // KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
@@ -130,9 +134,18 @@ func validatePredictor(c *controller.Context) error {
 	if !ok {
 		return fmt.Errorf("the %q component is required for the %q topology", common.ComponentPredictor, common.TopologyPredictor)
 	}
+	// KServe's webhook rejects other InferenceService names, which would leave
+	// the Instance without a status.
+	if errs := validation.IsDNS1035Label(c.Name()); len(errs) > 0 {
+		return fmt.Errorf("instance name %q is not valid for a predictor: %s", c.Name(), strings.Join(errs, "; "))
+	}
 
 	var params components.ModelServerCustomSpec
 	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return err
+	}
 	if params.ModelFormat == "" {
 		return fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
 	}
@@ -141,6 +154,12 @@ func validatePredictor(c *controller.Context) error {
 	}
 	if params.MinReplicas != nil && *params.MinReplicas < 0 {
 		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
+	}
+	if params.GpuCount != nil && *params.GpuCount < 0 {
+		return fmt.Errorf("%s.parameters.gpuCount must not be negative", common.ComponentPredictor)
+	}
+	if params.Task != "" && !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
+		return fmt.Errorf("%s.parameters.task is only supported with modelFormat %q", common.ComponentPredictor, huggingFaceModelFormat)
 	}
 	if params.StorageContainer != "" {
 		if err := validateStorageContainer(c, params.StorageContainer, params.StorageURI); err != nil {
@@ -246,19 +265,24 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 
 	var params components.ModelServerCustomSpec
 	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return nil, err
+	}
 
 	if params.ModelFormat == "" {
 		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
 	}
 
+	resources := predictorResources(comp.Resources, params.GpuCount)
 	predictor := predictorSpec{Model: &modelSpec{
-		ModelFormat:    modelFormat{Name: params.ModelFormat},
-		Runtime:        params.Runtime,
-		StorageURI:     params.StorageURI,
-		RuntimeVersion: params.RuntimeVersion,
-		Resources:      comp.Resources,
+		ModelFormat:     modelFormat{Name: params.ModelFormat},
+		Runtime:         params.Runtime,
+		StorageURI:      params.StorageURI,
+		RuntimeVersion:  params.RuntimeVersion,
+		Resources:       resources,
 		Env:             params.Env,
-		Args:            params.Args,
+		Args:            predictorArgs(params, resources),
 		SecurityContext: params.ContainerSecurityContext,
 	}}
 	predictor.ServiceAccountName = params.ServiceAccountName
@@ -282,6 +306,9 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		predictor.MaxReplicas = *params.MaxReplicas
 	}
 	predictor.StorageContainerName = params.StorageContainer
+	if usesHFTokenServiceAccount(params) {
+		predictor.ServiceAccountName = modelPullerSAName(c.Name())
+	}
 
 	// KServe copies InferenceService labels and annotations to the predictor
 	// pods; provider-managed keys are applied last so they always win.
@@ -304,6 +331,113 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	return isvc, nil
 }
 
+// predictorArgs adds the huggingface runtime flags the provider manages to the
+// user's args: --task from the task parameter, and the transformers backend
+// when no GPU is requested (the runtime otherwise picks vLLM, which fails to
+// start without one). On a GPU the runtime uses vLLM, which ignores --task and
+// serves decoder-based embedding models (e.g. Qwen3-Embedding) as text
+// generators unless told to pool. Flags the user passed explicitly win.
+func predictorArgs(params components.ModelServerCustomSpec, res *corev1.ResourceRequirements) []string {
+	if !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
+		return params.Args
+	}
+	args := slices.Clone(params.Args)
+	embedding := false
+	if params.Task != "" && !hasFlag(args, "--task") {
+		args = append([]string{"--task=" + params.Task}, args...)
+		embedding = params.Task == textEmbeddingTask
+	}
+	gpu := requestsGPU(res)
+	if !gpu && !hasFlag(args, "--backend") {
+		args = append(args, "--backend=huggingface")
+	}
+	if gpu && embedding && !hasFlag(args, "--runner") {
+		args = append(args, "--runner=pooling")
+	}
+	return args
+}
+
+func hasFlag(args []string, flag string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		return a == flag || strings.HasPrefix(a, flag+"=")
+	})
+}
+
+func requestsGPU(res *corev1.ResourceRequirements) bool {
+	if res == nil {
+		return false
+	}
+	for _, list := range []corev1.ResourceList{res.Limits, res.Requests} {
+		for name, qty := range list {
+			if strings.HasSuffix(string(name), "/gpu") && !qty.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usesHFTokenServiceAccount reports whether the predictor downloads from the
+// Hugging Face Hub with the chart's token configured; KServe's
+// storage-initializer reads the token from the pod's ServiceAccount. A
+// user-set serviceAccountName wins, so that account must carry the token.
+func usesHFTokenServiceAccount(params components.ModelServerCustomSpec) bool {
+	return params.ServiceAccountName == "" && common.HFTokenSecretName() != "" && strings.HasPrefix(params.StorageURI, "hf://")
+}
+
+// resolveCatalogModel fills modelFormat, storageURI and task from the catalog
+// entry named by model. Setting modelFormat or storageURI opts out of the
+// catalog: mixing a catalog URI with another format would serve the wrong
+// runtime.
+func resolveCatalogModel(params components.ModelServerCustomSpec) (components.ModelServerCustomSpec, error) {
+	if params.Model == "" || params.ModelFormat != "" || params.StorageURI != "" {
+		return params, nil
+	}
+	entry, ok := common.LookupPredictorModel(params.Model)
+	if !ok {
+		return params, fmt.Errorf("%s.parameters.model: %q is not in the provider's model catalog", common.ComponentPredictor, params.Model)
+	}
+	params.ModelFormat = entry.ModelFormat
+	params.StorageURI = entry.StorageURI
+	if params.Task == "" {
+		params.Task = entry.Task
+	}
+	if params.GpuCount == nil && entry.GpuCount > 0 {
+		params.GpuCount = &entry.GpuCount
+	}
+	return params, nil
+}
+
+// predictorResources adds the nvidia.com/gpu limit for gpuCount (the UI cannot
+// write that resource key directly) and defaults each missing request to its
+// limit. Without that KServe fills in the serving runtime's requests (2Gi
+// memory for most), and a lower limit makes the Deployment invalid.
+func predictorResources(res *corev1.ResourceRequirements, gpuCount *int32) *corev1.ResourceRequirements {
+	gpu := gpuCount != nil && *gpuCount > 0
+	if res == nil && !gpu {
+		return nil
+	}
+	out := &corev1.ResourceRequirements{}
+	if res != nil {
+		out = res.DeepCopy()
+	}
+	if gpu {
+		if out.Limits == nil {
+			out.Limits = corev1.ResourceList{}
+		}
+		out.Limits[nvidiaGPUResource] = *resource.NewQuantity(int64(*gpuCount), resource.DecimalSI)
+	}
+	for name, limit := range out.Limits {
+		if out.Requests == nil {
+			out.Requests = corev1.ResourceList{}
+		}
+		if _, ok := out.Requests[name]; !ok {
+			out.Requests[name] = limit
+		}
+	}
+	return out
+}
+
 // mergeMaps returns a new map with base's entries overridden by override's.
 func mergeMaps(base, override map[string]string) map[string]string {
 	out := make(map[string]string, len(base)+len(override))
@@ -315,6 +449,19 @@ func mergeMaps(base, override map[string]string) map[string]string {
 // syncPredictor creates or updates the InferenceService and the optional
 // external Service in front of it.
 func (p *Provider) syncPredictor(c *controller.Context) error {
+	comp := c.Instance().Spec.Components[common.ComponentPredictor]
+	var params components.ModelServerCustomSpec
+	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return err
+	}
+	if usesHFTokenServiceAccount(params) {
+		if err := ensureModelPullerServiceAccount(c); err != nil {
+			return err
+		}
+	}
+
 	isvc, err := buildInferenceService(c)
 	if err != nil {
 		return err
@@ -322,7 +469,11 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := common.Apply(c.Context(), c.Client(), c.Instance(), isvc); err != nil {
 		return err
 	}
-	comp := c.Instance().Spec.Components[common.ComponentPredictor]
+	var topo predictor.PredictorTopologyParameters
+	c.TryDecodeTopologyParameters(&topo)
+	if err := syncPodMonitor(c, topo.MetricsEnabled(), buildPredictorPodMonitor(c.Name(), c.Instance().Namespace, c.PodLabels(common.ComponentPredictor), common.PodMonitorInterval())); err != nil {
+		return err
+	}
 	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
 }
 
@@ -349,6 +500,8 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 	ready := status.GetCondition(apis.ConditionReady)
 	if ready != nil && ready.IsTrue() {
 		if details := predictorConnectionDetails(c, status); details != nil {
+			// KServe runtimes serve the model under the InferenceService name.
+			details.AdditionalProperties = map[string]string{"model": c.Name()}
 			return controller.ReadyWithConnectionDetails(*details), nil
 		}
 		return controller.Ready(), nil

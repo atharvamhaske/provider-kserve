@@ -167,6 +167,11 @@ const (
 // component type, which is rendered into a KServe InferenceService predictor
 // (serving.kserve.io/v1beta1).
 type ModelServerCustomSpec struct {
+	// Model names an entry of the chart's predictorModels catalog (the UI model
+	// picker). It supplies modelFormat, storageURI and task unless modelFormat
+	// or storageURI is set, in which case the catalog entry is ignored.
+	Model string `json:"model,omitempty"`
+
 	// ModelFormat is the model framework, e.g. "sklearn", "pytorch",
 	// "tensorflow", "xgboost", "onnx", "triton", "huggingface". KServe uses it
 	// to auto-select a supporting ServingRuntime.
@@ -201,8 +206,19 @@ type ModelServerCustomSpec struct {
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// Args is appended to the serving runtime's arguments (e.g.
-	// --task=text_embedding for the huggingface runtime).
+	// --task=text_embedding for the huggingface runtime). For huggingface
+	// without a GPU the provider adds --backend=huggingface unless set here.
 	Args []string `json:"args,omitempty"`
+
+	// Task selects the huggingface runtime task (--task), e.g. text_embedding
+	// or sequence_classification. Empty lets the runtime infer it from the
+	// model config. Only valid with modelFormat huggingface; a --task in Args
+	// wins.
+	Task string `json:"task,omitempty"`
+
+	// GpuCount is the number of GPUs (nvidia.com/gpu) each predictor pod
+	// requests. Unset takes the catalog entry's value; 0 runs on CPU.
+	GpuCount *int32 `json:"gpuCount,omitempty"`
 
 	// ServiceAccountName is the ServiceAccount the predictor pods run as (e.g.
 	// one bound to cloud IAM for model downloads). Empty uses the namespace

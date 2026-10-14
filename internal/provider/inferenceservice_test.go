@@ -83,7 +83,11 @@ func TestBuildInferenceService(t *testing.T) {
 					"runtime":        "kserve-sklearnserver",
 					"storageUri":     "gs://bucket/iris",
 					"runtimeVersion": "1.5",
-					"resources":      map[string]any{"limits": map[string]any{"memory": "1Gi"}},
+					// Requests default to limits so the runtime's 2Gi request cannot exceed them.
+					"resources": map[string]any{
+						"limits":   map[string]any{"memory": "1Gi"},
+						"requests": map[string]any{"memory": "1Gi"},
+					},
 				},
 			},
 		}
@@ -130,9 +134,9 @@ func TestBuildInferenceService(t *testing.T) {
 		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
 			SchedulingPolicy: policy,
 			Parameters: rawJSON(t, components.ModelServerCustomSpec{
-				ModelFormat: "huggingface",
+				ModelFormat: "sklearn",
 				Env:         []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}},
-				Args:        []string{"--task=text_embedding"},
+				Args:        []string{"--workers=1"},
 			}),
 		})
 
@@ -145,7 +149,7 @@ func TestBuildInferenceService(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := spec.Predictor
-		if !reflect.DeepEqual(got.Model.Env, []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}}) || !reflect.DeepEqual(got.Model.Args, []string{"--task=text_embedding"}) {
+		if !reflect.DeepEqual(got.Model.Env, []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}}) || !reflect.DeepEqual(got.Model.Args, []string{"--workers=1"}) {
 			t.Fatalf("env = %v, args = %v", got.Model.Env, got.Model.Args)
 		}
 		if got.SchedulerName != policy.SchedulerName || !reflect.DeepEqual(got.NodeSelector, policy.NodeSelector) ||
@@ -519,6 +523,210 @@ func TestStatusPredictor(t *testing.T) {
 			if got.ConnectionDetails.URI != tc.wantURI {
 				t.Fatalf("connection details = %+v, want URI %q", got.ConnectionDetails, tc.wantURI)
 			}
+			if tc.wantURI != "" && got.ConnectionDetails.AdditionalProperties["model"] != "iris" {
+				t.Fatalf("model = %q, want the Instance name", got.ConnectionDetails.AdditionalProperties["model"])
+			}
 		})
+	}
+}
+
+func TestPredictorArgs(t *testing.T) {
+	gpu := &corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+	cpu := &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}}
+	cases := []struct {
+		name   string
+		format string
+		task   string
+		args   []string
+		res    *corev1.ResourceRequirements
+		want   []string
+	}{
+		{name: "huggingface on CPU gets the transformers backend", format: "huggingface", args: []string{"--task=text_embedding"}, res: cpu, want: []string{"--task=text_embedding", "--backend=huggingface"}},
+		{name: "no resources counts as CPU", format: "huggingface", want: []string{"--backend=huggingface"}},
+		{name: "huggingface on GPU keeps the runtime default", format: "huggingface", res: gpu},
+		{name: "explicit backend is kept", format: "huggingface", args: []string{"--backend=vllm"}, res: cpu, want: []string{"--backend=vllm"}},
+		{name: "task parameter becomes the first flag", format: "huggingface", task: "text_embedding", args: []string{"--max_length=256"}, res: gpu, want: []string{"--task=text_embedding", "--max_length=256", "--runner=pooling"}},
+		{name: "embeddings on CPU need no runner", format: "huggingface", task: "text_embedding", res: cpu, want: []string{"--task=text_embedding", "--backend=huggingface"}},
+		{name: "explicit runner is kept", format: "huggingface", task: "text_embedding", args: []string{"--runner=generate"}, res: gpu, want: []string{"--task=text_embedding", "--runner=generate"}},
+		{name: "other GPU tasks need no runner", format: "huggingface", task: "sequence_classification", res: gpu, want: []string{"--task=sequence_classification"}},
+		{name: "task in args wins over the parameter", format: "huggingface", task: "text_embedding", args: []string{"--task", "fill_mask"}, res: gpu, want: []string{"--task", "fill_mask"}},
+		{name: "other formats are untouched", format: "sklearn", args: []string{"--workers=1"}, res: cpu, want: []string{"--workers=1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := components.ModelServerCustomSpec{ModelFormat: tc.format, Task: tc.task, Args: tc.args}
+			if got := predictorArgs(params, tc.res); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("args = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidatePredictorTask(t *testing.T) {
+	for format, wantErr := range map[string]bool{"huggingface": false, "sklearn": true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: format, StorageURI: "hf://org/model", Task: "text_embedding"}),
+		})
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%s: err = %v, wantErr %t", format, err, wantErr)
+		}
+	}
+}
+
+func predictorCatalogEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("PREDICTOR_MODEL_CATALOG", `[
+		{"label":"MiniLM","name":"minilm","modelFormat":"huggingface","storageURI":"hf://sentence-transformers/all-MiniLM-L6-v2","task":"text_embedding"},
+		{"label":"Qwen3 Embedding","name":"qwen3-embedding","modelFormat":"huggingface","storageURI":"hf://Qwen/Qwen3-Embedding-0.6B","task":"text_embedding","gpuCount":1},
+		{"label":"Iris","name":"iris","modelFormat":"sklearn","storageURI":"gs://bucket/iris"}
+	]`)
+	common.ResetPredictorCatalogForTest()
+	t.Cleanup(common.ResetPredictorCatalogForTest)
+}
+
+func TestResolveCatalogModel(t *testing.T) {
+	predictorCatalogEnv(t)
+	cases := []struct {
+		name    string
+		in      components.ModelServerCustomSpec
+		want    components.ModelServerCustomSpec
+		wantErr bool
+	}{
+		{
+			name: "catalog entry fills format, URI and task",
+			in:   components.ModelServerCustomSpec{Model: "minilm"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "huggingface", StorageURI: "hf://sentence-transformers/all-MiniLM-L6-v2", Task: "text_embedding"},
+		},
+		{
+			name: "explicit task wins",
+			in:   components.ModelServerCustomSpec{Model: "minilm", Task: "fill_mask"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "huggingface", StorageURI: "hf://sentence-transformers/all-MiniLM-L6-v2", Task: "fill_mask"},
+		},
+		{
+			name: "GPU catalog entry sets gpuCount",
+			in:   components.ModelServerCustomSpec{Model: "qwen3-embedding"},
+			want: components.ModelServerCustomSpec{Model: "qwen3-embedding", ModelFormat: "huggingface", StorageURI: "hf://Qwen/Qwen3-Embedding-0.6B", Task: "text_embedding", GpuCount: ptr.To(int32(1))},
+		},
+		{
+			name: "explicit gpuCount wins",
+			in:   components.ModelServerCustomSpec{Model: "qwen3-embedding", GpuCount: ptr.To(int32(0))},
+			want: components.ModelServerCustomSpec{Model: "qwen3-embedding", ModelFormat: "huggingface", StorageURI: "hf://Qwen/Qwen3-Embedding-0.6B", Task: "text_embedding", GpuCount: ptr.To(int32(0))},
+		},
+		{
+			name: "custom format and URI ignore the catalog",
+			in:   components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "sklearn", StorageURI: "gs://bucket/mine"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "sklearn", StorageURI: "gs://bucket/mine"},
+		},
+		{
+			name: "no model leaves params alone",
+			in:   components.ModelServerCustomSpec{ModelFormat: "onnx"},
+			want: components.ModelServerCustomSpec{ModelFormat: "onnx"},
+		},
+		{name: "unknown model", in: components.ModelServerCustomSpec{Model: "nope"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveCatalogModel(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %t", err, tc.wantErr)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("params = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidatePredictorInstanceName(t *testing.T) {
+	for name, wantErr := range map[string]bool{"iris": false, "bge-small-en-v1.5": true, "1st-model": true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}),
+		})
+		c.Instance().Name = name
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%s: err = %v, wantErr %t", name, err, wantErr)
+		}
+	}
+}
+
+func TestBuildInferenceServiceFromCatalog(t *testing.T) {
+	predictorCatalogEnv(t)
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+		Parameters: rawJSON(t, components.ModelServerCustomSpec{Model: "minilm"}),
+	})
+	if err := validatePredictor(c); err != nil {
+		t.Fatal(err)
+	}
+	isvc, err := buildInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _, _ := unstructured.NestedMap(isvc.Object, "spec", "predictor", "model")
+	want := map[string]any{
+		"modelFormat": map[string]any{"name": "huggingface"},
+		"storageUri":  "hf://sentence-transformers/all-MiniLM-L6-v2",
+		"args":        []any{"--task=text_embedding", "--backend=huggingface"},
+	}
+	if !reflect.DeepEqual(model, want) {
+		t.Fatalf("model = %#v\nwant %#v", model, want)
+	}
+}
+
+func TestBuildInferenceServiceGPUCatalogModel(t *testing.T) {
+	predictorCatalogEnv(t)
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+		Resources:  &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Gi")}},
+		Parameters: rawJSON(t, components.ModelServerCustomSpec{Model: "qwen3-embedding"}),
+	})
+	isvc, err := buildInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _, _ := unstructured.NestedMap(isvc.Object, "spec", "predictor", "model")
+	want := map[string]any{
+		"modelFormat": map[string]any{"name": "huggingface"},
+		"storageUri":  "hf://Qwen/Qwen3-Embedding-0.6B",
+		"resources": map[string]any{
+			"limits":   map[string]any{"memory": "16Gi", "nvidia.com/gpu": "1"},
+			"requests": map[string]any{"memory": "16Gi", "nvidia.com/gpu": "1"},
+		},
+		"args": []any{"--task=text_embedding", "--runner=pooling"},
+	}
+	if !reflect.DeepEqual(model, want) {
+		t.Fatalf("model = %#v\nwant %#v", model, want)
+	}
+}
+
+func TestValidatePredictorGPUCount(t *testing.T) {
+	for count, wantErr := range map[int32]bool{0: false, 2: false, -1: true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", GpuCount: ptr.To(count)}),
+		})
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%d: err = %v, wantErr %t", count, err, wantErr)
+		}
+	}
+}
+
+func TestBuildInferenceServiceHFTokenServiceAccount(t *testing.T) {
+	t.Setenv("HF_TOKEN_SECRET_NAME", "hf-token")
+	for _, tc := range []struct {
+		uri, serviceAccount, want string
+	}{
+		{uri: "hf://sentence-transformers/all-MiniLM-L6-v2", want: "iris-model-puller"},
+		{uri: "gs://bucket/iris"},
+		{uri: "hf://sentence-transformers/all-MiniLM-L6-v2", serviceAccount: "models-reader", want: "models-reader"},
+	} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: tc.uri, ServiceAccountName: tc.serviceAccount}),
+		})
+		isvc, err := buildInferenceService(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, _ := unstructured.NestedString(isvc.Object, "spec", "predictor", "serviceAccountName")
+		if got != tc.want {
+			t.Fatalf("%s with %q: serviceAccountName = %q, want %q", tc.uri, tc.serviceAccount, got, tc.want)
+		}
 	}
 }

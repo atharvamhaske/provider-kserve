@@ -1,0 +1,38 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-huggingface
+spec:
+  description: |
+    A CPU-only huggingface predictor gets --backend=huggingface after the
+    user's args (the runtime's default vLLM backend needs a GPU), and an
+    explicit --backend is left alone.
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice -o yaml
+  steps:
+    - name: cpu-default-backend
+      try:
+        - apply:
+            file: 00-instance.yaml
+            bindings:
+              - name: args
+                value: [--task=text_embedding]
+        - assert:
+            file: 00-assert-isvc.yaml
+            bindings:
+              - name: args
+                value: [--task=text_embedding, --backend=huggingface]
+
+    - name: explicit-backend
+      try:
+        - apply:
+            file: 00-instance.yaml
+            bindings:
+              - name: args
+                value: [--task=text_embedding, --backend=vllm]
+        - assert:
+            file: 00-assert-isvc.yaml
+            bindings:
+              - name: args
+                value: [--task=text_embedding, --backend=vllm]

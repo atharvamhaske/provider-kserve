@@ -260,6 +260,9 @@ spec:
                     type: object
                 type: object
               type: array
+            gpuCount:
+              format: int32
+              type: integer
             labels:
               additionalProperties:
                 type: string
@@ -270,6 +273,8 @@ spec:
             minReplicas:
               format: int32
               type: integer
+            model:
+              type: string
             modelFormat:
               type: string
             runtime:
@@ -352,6 +357,8 @@ spec:
               type: string
             storageURI:
               type: string
+            task:
+              type: string
           type: object
       type: modelServer
   defaultVersion: "0.21"
@@ -423,6 +430,17 @@ spec:
               format: int32
               type: integer
             tracingEndpoint:
+              type: string
+          type: object
+    predictor:
+      components:
+        predictor: {}
+      parametersSchema:
+        openAPIV3Schema:
+          properties:
+            enableMetrics:
+              type: boolean
+            externalAccess:
               type: string
           type: object
   uiSchema:
@@ -963,6 +981,267 @@ spec:
         - disaggregation
         - observability
         - advanced
+    predictor:
+      sections:
+        basicInfo:
+          components:
+            customModel:
+              components:
+                modelFormat:
+                  fieldParams:
+                    helperText: KServe picks the serving runtime that supports this format.
+                    label: Model Format
+                    options:
+                      - label: Hugging Face (Transformers, embeddings)
+                        value: huggingface
+                      - label: scikit-learn
+                        value: sklearn
+                      - label: XGBoost
+                        value: xgboost
+                      - label: LightGBM
+                        value: lightgbm
+                      - label: PyTorch (TorchServe)
+                        value: pytorch
+                      - label: TensorFlow
+                        value: tensorflow
+                      - label: ONNX
+                        value: onnx
+                      - label: Triton
+                        value: triton
+                      - label: TensorRT
+                        value: tensorrt
+                      - label: MLflow
+                        value: mlflow
+                      - label: PMML
+                        value: pmml
+                      - label: PaddlePaddle
+                        value: paddle
+                      - label: AutoGluon
+                        value: autogluon
+                  path: spec.components.predictor.parameters.modelFormat
+                  uiType: select
+                  validation:
+                    required: true
+                storageURI:
+                  fieldParams:
+                    helperText: hf://, s3://, gs://, pvc:// or https:// location of the model.
+                    label: Model Storage URI
+                    placeholder: hf://sentence-transformers/all-MiniLM-L6-v2
+                  path: spec.components.predictor.parameters.storageURI
+                  uiType: text
+                  validation:
+                    required: true
+                task:
+                  fieldParams:
+                    displayEmpty: true
+                    helperText: Hugging Face only. Empty lets the runtime infer it from the model.
+                    label: Task
+                    options:
+                      - label: Text embedding
+                        value: text_embedding
+                      - label: Sequence classification
+                        value: sequence_classification
+                      - label: Token classification
+                        value: token_classification
+                      - label: Fill mask
+                        value: fill_mask
+                      - label: Text generation
+                        value: text_generation
+                      - label: Text-to-text generation
+                        value: text2text_generation
+                  path: spec.components.predictor.parameters.task
+                  uiType: select
+                  validation:
+                    celExpressions:
+                      - celExpr: '!has(spec.components.predictor.parameters.task) || spec.components.predictor.parameters.modelFormat == "huggingface"'
+                        message: Task requires Model Format = Hugging Face
+              componentsOrder:
+                - modelFormat
+                - storageURI
+                - task
+              description: Serve your own model instead of the catalog entry.
+              groupType: toggleable
+              label: Custom model
+              uiType: group
+            model:
+              fieldParams:
+                helperText: Pick a model from the catalog, or turn on Custom model below.
+                label: Model
+                optionsPath: spec.uiSchema.predictor.modelCatalog
+                optionsPathConfig:
+                  labelPath: label
+                  valuePath: name
+              path: spec.components.predictor.parameters.model
+              uiType: select
+              validation:
+                required: true
+            version:
+              fieldParams:
+                label: KServe Version
+                optionsPath: spec.componentTypes.modelServer.versions
+                optionsPathConfig:
+                  defaultValuePath: spec.componentTypes.modelServer.defaultVersion
+                  labelPath: version
+                  valuePath: version
+              path: spec.components.predictor.version
+              uiType: select
+              validation:
+                required: true
+          componentsOrder:
+            - model
+            - customModel
+            - version
+          description: Configure the model to serve.
+          label: Basic Information
+        observability:
+          components:
+            enableMetrics:
+              fieldParams:
+                defaultValue: "true"
+                helperText: Emits a PodMonitor for the model server's metrics endpoint. Requires the Prometheus Operator in the cluster.
+                label: Prometheus metrics
+                options:
+                  - label: Enabled
+                    value: "true"
+                  - label: Disabled
+                    value: "false"
+              path: spec.topology.parameters.enableMetrics
+              uiType: select
+          componentsOrder:
+            - enableMetrics
+          label: Observability
+        resources:
+          components:
+            resources:
+              components:
+                cpu:
+                  fieldParams:
+                    defaultValue: 2
+                    label: CPU
+                    step: 1
+                  path: spec.components.predictor.resources.limits.cpu
+                  uiType: number
+                  validation:
+                    min: 0.5
+                    required: true
+                gpuCount:
+                  fieldParams:
+                    label: GPUs
+                    placeholder: From the model
+                    step: 1
+                  path: spec.components.predictor.parameters.gpuCount
+                  uiType: number
+                  validation:
+                    int: true
+                    max: 8
+                    min: 0
+                memory:
+                  fieldParams:
+                    badge: Gi
+                    badgeToApi: true
+                    defaultValue: 4
+                    label: Memory
+                    step: 1
+                  path: spec.components.predictor.resources.limits.memory
+                  uiType: number
+                  validation:
+                    min: 1
+                    required: true
+              groupType: line
+              uiType: group
+          componentsOrder:
+            - resources
+          description: CPU, memory and GPUs for each model server pod.
+          label: Resources
+        routing:
+          components:
+            externalAccess:
+              fieldParams:
+                defaultValue: ClusterIP
+                label: External access
+                options:
+                  - label: ClusterIP
+                    value: ClusterIP
+                  - label: LoadBalancer
+                    value: LoadBalancer
+                  - label: NodePort
+                    value: NodePort
+              path: spec.topology.parameters.externalAccess
+              uiType: select
+          componentsOrder:
+            - externalAccess
+          description: How clients reach the model. ClusterIP stays in-cluster; LoadBalancer and NodePort create a Service in front of the predictor pods.
+          label: Routing
+        runtime:
+          components:
+            runtime:
+              fieldParams:
+                label: Serving Runtime
+                placeholder: Auto-selected from the model format
+              path: spec.components.predictor.parameters.runtime
+              uiType: text
+            runtimeVersion:
+              fieldParams:
+                label: Runtime Version
+              path: spec.components.predictor.parameters.runtimeVersion
+              uiType: text
+            storageContainer:
+              fieldParams:
+                label: Storage Container
+              path: spec.components.predictor.parameters.storageContainer
+              uiType: text
+          componentsOrder:
+            - runtime
+            - runtimeVersion
+            - storageContainer
+          description: Optional overrides for how the model is served and downloaded.
+          label: Serving Runtime
+        scaling:
+          components:
+            maxReplicas:
+              fieldParams:
+                label: Max Replicas
+              path: spec.components.predictor.parameters.maxReplicas
+              uiType: number
+              validation:
+                max: 32
+                min: 1
+            minReplicas:
+              fieldParams:
+                defaultValue: 1
+                label: Min Replicas
+              path: spec.components.predictor.parameters.minReplicas
+              uiType: number
+              validation:
+                celExpressions:
+                  - celExpr: '!has(spec.components.predictor.parameters.minReplicas) || !has(spec.components.predictor.parameters.maxReplicas) || spec.components.predictor.parameters.minReplicas <= spec.components.predictor.parameters.maxReplicas'
+                    message: Min Replicas cannot exceed Max Replicas
+                max: 32
+                min: 0
+          componentsOrder:
+            - minReplicas
+            - maxReplicas
+          description: Autoscaling bounds for the predictor.
+          label: Scaling
+        scheduling:
+          components:
+            podSchedulingPolicy:
+              components:
+                policy:
+                  uiType: widget
+                  widgetType: podSchedulingPolicy
+              groupType: toggleable
+              label: Pod scheduling policy
+              uiType: group
+          label: Scheduling
+      sectionsOrder:
+        - basicInfo
+        - runtime
+        - resources
+        - scaling
+        - routing
+        - observability
+        - scheduling
   versions:
     - components:
         llmEngine: 0.26.0

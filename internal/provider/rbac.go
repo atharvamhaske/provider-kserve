@@ -41,7 +41,7 @@ package provider
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
 
-// Prometheus Operator PodMonitor emitted per llm Instance (optional metrics):
+// Prometheus Operator PodMonitor emitted per Instance (optional metrics):
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=podmonitors,verbs=get;list;watch;create;update;patch;delete
 
 // Core resources referenced by model serving (model credentials, endpoints).
@@ -53,5 +53,5 @@ package provider
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // ServiceAccounts carry the HuggingFace token Secret for gated model downloads
-// (attached to the llm workload so KServe injects HF_TOKEN).
+// (attached to llm workloads and hf:// predictors so KServe injects HF_TOKEN).
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
