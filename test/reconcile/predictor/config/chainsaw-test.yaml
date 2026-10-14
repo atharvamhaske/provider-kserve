@@ -1,0 +1,109 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-config
+spec:
+  description: |
+    Raw fields reach the InferenceService, structured fields win conflicts,
+    invalid config fails without changing the workload, and removing config
+    removes its fields on the next successful reconcile.
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice -o yaml
+  steps:
+    - name: merge
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert.yaml
+
+    - name: reject-invalid-update
+      try:
+        - patch:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-config
+              spec:
+                components:
+                  predictor:
+                    parameters:
+                      config: |
+                        predictor:
+                          batcher:
+                            maxBatchSize: not-an-integer
+        - assert:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-config
+              status:
+                phase: Failed
+        - assert:
+            file: 00-assert.yaml
+
+    - name: remove-config
+      try:
+        - patch:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-config
+              spec:
+                components:
+                  predictor:
+                    parameters:
+                      config: ""
+        - assert:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: test-predictor-config
+              spec:
+                predictor:
+                  minReplicas: 1
+                  maxReplicas: 3
+                  (batcher == null): true
+                  (logger == null): true
+                  model:
+                    (livenessProbe == null): true
+                    modelFormat:
+                      name: sklearn
+
+    - name: reject-malformed-and-unknown-fields
+      try:
+        - apply:
+            file: 10-invalid.yaml
+        - assert:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-config-malformed
+              status:
+                phase: Failed
+        - assert:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-config-unknown
+              status:
+                phase: Failed
+        - error:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: test-predictor-config-malformed
+        - error:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: test-predictor-config-unknown

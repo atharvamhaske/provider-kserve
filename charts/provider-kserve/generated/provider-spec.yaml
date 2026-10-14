@@ -128,6 +128,8 @@ spec:
               items:
                 type: string
               type: array
+            config:
+              type: string
             containerSecurityContext:
               properties:
                 allowPrivilegeEscalation:

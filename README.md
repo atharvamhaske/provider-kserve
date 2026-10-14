@@ -65,7 +65,7 @@ provider itself is covered under [Installation](#installation).
 | Horizontal scaling | ✅ | `predictor`: `minReplicas` / `maxReplicas` (`0` enables scale-to-zero). `llm`: static `replicas`, or WVA `minReplicas` / `maxReplicas` + `scalingActuator` (`hpa` \| `keda`) on decode and prefill. LLM min is ≥ 1 (no scale-to-zero). With `workerCount`, one replica is a full head+worker ring. |
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.<name>.resources`; limits are mirrored into requests (Guaranteed QoS) |
 | Version upgrades | ✅ | of the deployed serving runtime version — change `spec.version`; see [Versions](#versions) |
-| Custom configuration | ✅ | structured parameters, plus an inline `LLMInferenceServiceConfig` escape hatch |
+| Custom configuration | ✅ | structured parameters, plus inline spec config for both `llm` and `predictor` |
 | Monitoring | ✅ | a `PodMonitor` per `llm` and `predictor` Instance; gateway token/cost metrics when the AI Gateway is enabled |
 | TLS | ✅ | optional HTTPS on the shared Envoy AI Gateway, issued by cert-manager |
 
@@ -259,6 +259,7 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `runtime` | string | Explicitly select a (Cluster)ServingRuntime by name. |
 | `minReplicas` | int32 | Autoscaling floor (`0` enables scale-to-zero). |
 | `maxReplicas` | int32 | Autoscaling ceiling. |
+| `config` | string | Inline `InferenceService` spec body. Structured fields win conflicts. See [Predictor inline config](#predictor-inline-config). |
 | `storageContainer` | string | `ClusterStorageContainer` that downloads the model (`spec.predictor.storageContainerName`). Empty lets KServe match one on the URI scheme. Validation fails if it is missing, disabled, or does not support `storageURI`. |
 | `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
@@ -627,6 +628,73 @@ leaves too little free for even a modest reservation and fails the startup check
 model size. Give CPU instances enough headroom above that floor, and/or lower
 `--gpu-memory-utilization`.
 
+### Predictor inline config
+
+Set `spec.components.predictor.parameters.config` to one YAML `InferenceService`
+spec fragment. Use KServe field names inside it, such as `storageUri`, not the
+provider parameter `storageURI`. Do not include `apiVersion`, `kind`, metadata, or `spec`.
+
+For example, add batching, request logging, and a custom model-server probe:
+
+```yaml
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: iris-custom
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      parameters:
+        modelFormat: sklearn
+        storageURI: gs://kfserving-examples/models/sklearn/1.0/model
+        minReplicas: 1
+        config: |
+          predictor:
+            batcher:
+              maxBatchSize: 8
+              maxLatency: 100
+            logger:
+              mode: all
+              url: http://request-logger.default.svc.cluster.local
+            model:
+              livenessProbe:
+                httpGet:
+                  path: /v1/models/iris-custom
+                  port: 8080
+                initialDelaySeconds: 30
+                periodSeconds: 10
+```
+
+Use a reachable logging sink and a probe endpoint supported by your runtime.
+KServe deployment-mode and runtime restrictions still apply; accepting a spec
+does not guarantee that every runtime implements batching or logging.
+
+The provider recursively merges maps, then gives generated structured fields
+precedence. For example, `minReplicas: 1` above wins over a raw
+`predictor.minReplicas: 5`. Raw-only fields remain unchanged.
+
+Lists are replaced as a whole, not merged by name. Non-empty structured `args`
+or `env` replace the corresponding raw list. Provider-derived values, such as
+Hugging Face backend arguments and pod identity labels, also win.
+
+The provider rejects malformed YAML, duplicate keys, and multiple documents.
+It validates the merged resource with a strict server-side dry-run apply before
+Sync. The installed CRD and KServe webhooks reject invalid fields and combinations.
+
+Validation failures mark the Instance `Failed`; provider logs include
+`predictor.parameters.config` and the error details. The dry run persists nothing.
+Removing `config` removes its provider-owned fields on the next successful reconcile.
+
+Unlike [LLM inline config](#advanced-customization-inline-config), predictor config
+is merged directly into the `InferenceService`; no separate config resource or
+`baseRefs` entry is created. `modelFormat` and `storageURI`, or a catalog `model`,
+are still required.
+
 ### Advanced customization (inline config)
 
 The structured fields cover the common knobs (model, resources, parallelism, KV cache). For
@@ -656,6 +724,10 @@ over it. Enter only the config spec body — the provider supplies the metadata.
 
 To reference *pre-existing* shared configs instead of authoring one inline, list their names in
 `llmEngine.parameters.baseRefs` (API-only).
+
+Both topologies give structured fields precedence. LLM config composition runs
+in KServe through `baseRefs`; predictor config merging runs in this provider.
+The two fields accept different spec types and are not interchangeable.
 
 ### Deployment and networking
 
