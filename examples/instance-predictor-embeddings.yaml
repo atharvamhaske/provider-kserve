@@ -1,0 +1,29 @@
+# Example Instance CR for the provider-kserve provider: a sentence-embedding
+# model on CPU through the predictor topology (KServe Hugging Face runtime).
+#
+# Call it with the address from the Instance's connection Secret:
+#   curl -X POST http://<host>:<port>/openai/v1/embeddings \
+#     -H 'Content-Type: application/json' \
+#     -d '{"model": "minilm", "input": ["hello world"]}'
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: minilm
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      parameters:
+        modelFormat: huggingface
+        storageURI: hf://sentence-transformers/all-MiniLM-L6-v2
+        task: text_embedding

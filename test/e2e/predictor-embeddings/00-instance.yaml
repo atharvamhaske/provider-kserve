@@ -1,0 +1,21 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-minilm
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      parameters:
+        modelFormat: huggingface
+        storageURI: hf://sentence-transformers/all-MiniLM-L6-v2
+        task: text_embedding
