@@ -26,5 +26,4 @@ spec:
       parameters:
         modelFormat: huggingface
         storageURI: hf://sentence-transformers/all-MiniLM-L6-v2
-        args:
-          - --task=text_embedding
+        task: text_embedding

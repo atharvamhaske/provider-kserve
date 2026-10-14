@@ -463,6 +463,7 @@ func TestPredictorArgs(t *testing.T) {
 	cases := []struct {
 		name   string
 		format string
+		task   string
 		args   []string
 		res    *corev1.ResourceRequirements
 		want   []string
@@ -471,14 +472,28 @@ func TestPredictorArgs(t *testing.T) {
 		{name: "no resources counts as CPU", format: "huggingface", want: []string{"--backend=huggingface"}},
 		{name: "huggingface on GPU keeps the runtime default", format: "huggingface", res: gpu},
 		{name: "explicit backend is kept", format: "huggingface", args: []string{"--backend=vllm"}, res: cpu, want: []string{"--backend=vllm"}},
+		{name: "task parameter becomes the first flag", format: "huggingface", task: "text_embedding", args: []string{"--max_length=256"}, res: gpu, want: []string{"--task=text_embedding", "--max_length=256"}},
+		{name: "task in args wins over the parameter", format: "huggingface", task: "text_embedding", args: []string{"--task", "fill_mask"}, res: gpu, want: []string{"--task", "fill_mask"}},
 		{name: "other formats are untouched", format: "sklearn", args: []string{"--workers=1"}, res: cpu, want: []string{"--workers=1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := predictorArgs(tc.format, tc.args, tc.res); !reflect.DeepEqual(got, tc.want) {
+			params := components.ModelServerCustomSpec{ModelFormat: tc.format, Task: tc.task, Args: tc.args}
+			if got := predictorArgs(params, tc.res); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("args = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidatePredictorTask(t *testing.T) {
+	for format, wantErr := range map[string]bool{"huggingface": false, "sklearn": true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: format, StorageURI: "hf://org/model", Task: "text_embedding"}),
+		})
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%s: err = %v, wantErr %t", format, err, wantErr)
+		}
 	}
 }
 
@@ -486,7 +501,7 @@ func TestBuildInferenceServiceHFTokenServiceAccount(t *testing.T) {
 	t.Setenv("HF_TOKEN_SECRET_NAME", "hf-token")
 	for uri, want := range map[string]string{
 		"hf://sentence-transformers/all-MiniLM-L6-v2": "iris-model-puller",
-		"gs://bucket/iris": "",
+		"gs://bucket/iris":                            "",
 	} {
 		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
 			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: uri}),

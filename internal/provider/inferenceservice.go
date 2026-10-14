@@ -141,6 +141,9 @@ func validatePredictor(c *controller.Context) error {
 	if params.MinReplicas != nil && *params.MinReplicas < 0 {
 		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
 	}
+	if params.Task != "" && !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
+		return fmt.Errorf("%s.parameters.task is only supported with modelFormat %q", common.ComponentPredictor, huggingFaceModelFormat)
+	}
 	if params.StorageContainer != "" {
 		if err := validateStorageContainer(c, params.StorageContainer, params.StorageURI); err != nil {
 			return fmt.Errorf("%s.parameters.storageContainer: %w", common.ComponentPredictor, err)
@@ -219,7 +222,7 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		RuntimeVersion: params.RuntimeVersion,
 		Resources:      comp.Resources,
 		Env:            params.Env,
-		Args:           predictorArgs(params.ModelFormat, params.Args, comp.Resources),
+		Args:           predictorArgs(params, comp.Resources),
 	}}
 	predictor.Labels = c.PodLabels(common.ComponentPredictor)
 	if policy := comp.SchedulingPolicy; policy != nil {
@@ -263,19 +266,28 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	return isvc, nil
 }
 
-// predictorArgs defaults the Hugging Face runtime to its transformers backend
-// when no GPU is requested: the runtime otherwise picks vLLM, which fails to
-// start without one. An explicit --backend is left alone.
-func predictorArgs(modelFormat string, args []string, res *corev1.ResourceRequirements) []string {
-	if !strings.EqualFold(modelFormat, huggingFaceModelFormat) || requestsGPU(res) {
-		return args
+// predictorArgs adds the huggingface runtime flags the provider manages to the
+// user's args: --task from the task parameter, and the transformers backend
+// when no GPU is requested (the runtime otherwise picks vLLM, which fails to
+// start without one). Flags the user passed explicitly win.
+func predictorArgs(params components.ModelServerCustomSpec, res *corev1.ResourceRequirements) []string {
+	if !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
+		return params.Args
 	}
-	for _, a := range args {
-		if a == "--backend" || strings.HasPrefix(a, "--backend=") {
-			return args
-		}
+	args := slices.Clone(params.Args)
+	if params.Task != "" && !hasFlag(args, "--task") {
+		args = append([]string{"--task=" + params.Task}, args...)
 	}
-	return append(slices.Clone(args), "--backend=huggingface")
+	if !requestsGPU(res) && !hasFlag(args, "--backend") {
+		args = append(args, "--backend=huggingface")
+	}
+	return args
+}
+
+func hasFlag(args []string, flag string) bool {
+	return slices.ContainsFunc(args, func(a string) bool {
+		return a == flag || strings.HasPrefix(a, flag+"=")
+	})
 }
 
 func requestsGPU(res *corev1.ResourceRequirements) bool {

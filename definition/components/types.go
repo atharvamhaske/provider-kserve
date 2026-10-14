@@ -204,4 +204,10 @@ type ModelServerCustomSpec struct {
 	// --task=text_embedding for the huggingface runtime). For huggingface
 	// without a GPU the provider adds --backend=huggingface unless set here.
 	Args []string `json:"args,omitempty"`
+
+	// Task selects the huggingface runtime task (--task), e.g. text_embedding
+	// or sequence_classification. Empty lets the runtime infer it from the
+	// model config. Only valid with modelFormat huggingface; a --task in Args
+	// wins.
+	Task string `json:"task,omitempty"`
 }

@@ -261,6 +261,7 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `storageContainer` | string | `ClusterStorageContainer` that downloads the model (`spec.predictor.storageContainerName`). Empty lets KServe match one on the URI scheme. Validation fails if it is missing, disabled, or does not support `storageURI`. |
 | `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
+| `task` | string | Hugging Face runtime task (`--task`), e.g. `text_embedding`. Only with `modelFormat: huggingface`; a `--task` in `args` wins. |
 
 `spec.components.predictor.schedulingPolicy` (scheduler name, node selector, affinity,
 tolerations, topology spread constraints) is applied to the predictor pods.
@@ -282,7 +283,7 @@ the model is served under (the Instance name).
 an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
 [examples/instance-predictor-embeddings.yaml](examples/instance-predictor-embeddings.yaml).
 
-- Pass `--task=text_embedding` in `args` for sentence-embedding models.
+- Set `task: text_embedding` for sentence-embedding models.
 - Without a GPU in `resources`, the provider adds `--backend=huggingface`: the runtime's
   default picks vLLM, which does not start on CPU. An explicit `--backend` is kept.
 - With `huggingface.tokenSecretName` set, `hf://` predictors use the same token
