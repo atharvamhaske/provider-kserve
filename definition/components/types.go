@@ -201,6 +201,7 @@ type ModelServerCustomSpec struct {
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// Args is appended to the serving runtime's arguments (e.g.
-	// --task=text_embedding for the huggingface runtime).
+	// --task=text_embedding for the huggingface runtime). For huggingface
+	// without a GPU the provider adds --backend=huggingface unless set here.
 	Args []string `json:"args,omitempty"`
 }

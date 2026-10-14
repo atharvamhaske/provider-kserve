@@ -273,7 +273,20 @@ tolerations, topology spread constraints) is applied to the predictor pods.
 
 With `LoadBalancer` or `NodePort` the provider creates `<instance>-external` (port 80 → 8080)
 and publishes its address as the connection details. With `ClusterIP` they point at KServe's
-in-cluster `<instance>-predictor` Service.
+in-cluster `<instance>-predictor` Service. The connection details also carry `model`, the name
+the model is served under (the Instance name).
+
+#### Embeddings
+
+`modelFormat: huggingface` serves Hub models through KServe's Hugging Face runtime, including
+an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
+[examples/instance-predictor-embeddings.yaml](examples/instance-predictor-embeddings.yaml).
+
+- Pass `--task=text_embedding` in `args` for sentence-embedding models.
+- Without a GPU in `resources`, the provider adds `--backend=huggingface`: the runtime's
+  default picks vLLM, which does not start on CPU. An explicit `--backend` is kept.
+- With `huggingface.tokenSecretName` set, `hf://` predictors use the same token
+  ServiceAccount as `llm` Instances, for gated models.
 
 ### `llm` topology parameters
 

@@ -259,7 +259,8 @@ loraAdapters:
 # as the Instances:
 #   kubectl create secret generic hf-token --from-literal=HF_TOKEN=hf_xxx
 # Then set `tokenSecretName` to that secret's name. The provider attaches the
-# secret to a dedicated ServiceAccount on each llm workload so KServe's
+# secret to a dedicated ServiceAccount on each llm workload, and on predictor
+# Instances with an hf:// storageURI, so KServe's
 # storage-initializer authenticates the download. The secret MUST contain an
 # `HF_TOKEN` key. Leave empty to disable (only ungated models will download).
 huggingface:

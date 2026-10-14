@@ -1,0 +1,42 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-embeddings
+spec:
+  description: |
+    Serve a small sentence-embedding model on CPU through the huggingface
+    runtime: the Instance becomes Ready, its connection Secret names the model
+    and the in-cluster address, and /openai/v1/embeddings returns a 384-d
+    vector for that model.
+  catch:
+    - script:
+        content: |
+          kubectl -n $NAMESPACE get instance,inferenceservice,pod -o wide
+          kubectl -n $NAMESPACE logs -l serving.kserve.io/inferenceservice=test-predictor-minilm --all-containers --tail=50
+  steps:
+    - name: ready
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-ready.yaml
+
+    - name: embed-through-connection-details
+      try:
+        - script:
+            content: |
+              set -eu
+              secret=$(kubectl -n "$NAMESPACE" get instance test-predictor-minilm -o jsonpath='{.status.connectionSecretRef.name}')
+              uri=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.uri}' | base64 -d)
+              model=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.model}' | base64 -d)
+              # Read the result from pod logs: `kubectl run -i` can echo stdout twice.
+              kubectl -n "$NAMESPACE" run embed --restart=Never --quiet \
+                --image=curlimages/curl:8.11.1 -- \
+                curl -sf -X POST "$uri/openai/v1/embeddings" \
+                -H 'Content-Type: application/json' \
+                -d "{\"model\":\"$model\",\"input\":[\"hello world\"]}" >/dev/null
+              kubectl -n "$NAMESPACE" wait pod/embed --for=jsonpath='{.status.phase}'=Succeeded --timeout=2m >/dev/null
+              kubectl -n "$NAMESPACE" logs embed
+            check:
+              ($error): ~
+              (length(json_parse($stdout).data[0].embedding)): 384

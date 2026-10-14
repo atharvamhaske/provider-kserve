@@ -4,6 +4,7 @@ package provider
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -40,6 +41,7 @@ type predictorSpec struct {
 	MaxReplicas               int32                             `json:"maxReplicas,omitempty"`
 	Labels                    map[string]string                 `json:"labels,omitempty"`
 	StorageContainerName      string                            `json:"storageContainerName,omitempty"`
+	ServiceAccountName        string                            `json:"serviceAccountName,omitempty"`
 	SchedulerName             string                            `json:"schedulerName,omitempty"`
 	NodeSelector              map[string]string                 `json:"nodeSelector,omitempty"`
 	Affinity                  *corev1.Affinity                  `json:"affinity,omitempty"`
@@ -73,6 +75,8 @@ const (
 	// runtimes listen.
 	predictorServicePort   = 80
 	predictorContainerPort = 8080
+
+	huggingFaceModelFormat = "huggingface"
 )
 
 // KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
@@ -215,7 +219,7 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		RuntimeVersion: params.RuntimeVersion,
 		Resources:      comp.Resources,
 		Env:            params.Env,
-		Args:           params.Args,
+		Args:           predictorArgs(params.ModelFormat, params.Args, comp.Resources),
 	}}
 	predictor.Labels = c.PodLabels(common.ComponentPredictor)
 	if policy := comp.SchedulingPolicy; policy != nil {
@@ -236,6 +240,9 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		predictor.MaxReplicas = *params.MaxReplicas
 	}
 	predictor.StorageContainerName = params.StorageContainer
+	if usesHFTokenServiceAccount(params.StorageURI) {
+		predictor.ServiceAccountName = modelPullerSAName(c.Name())
+	}
 
 	meta := c.ObjectMeta(c.Name())
 	if meta.Annotations == nil {
@@ -256,9 +263,54 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	return isvc, nil
 }
 
+// predictorArgs defaults the Hugging Face runtime to its transformers backend
+// when no GPU is requested: the runtime otherwise picks vLLM, which fails to
+// start without one. An explicit --backend is left alone.
+func predictorArgs(modelFormat string, args []string, res *corev1.ResourceRequirements) []string {
+	if !strings.EqualFold(modelFormat, huggingFaceModelFormat) || requestsGPU(res) {
+		return args
+	}
+	for _, a := range args {
+		if a == "--backend" || strings.HasPrefix(a, "--backend=") {
+			return args
+		}
+	}
+	return append(slices.Clone(args), "--backend=huggingface")
+}
+
+func requestsGPU(res *corev1.ResourceRequirements) bool {
+	if res == nil {
+		return false
+	}
+	for _, list := range []corev1.ResourceList{res.Limits, res.Requests} {
+		for name, qty := range list {
+			if strings.HasSuffix(string(name), "/gpu") && !qty.IsZero() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// usesHFTokenServiceAccount reports whether the predictor downloads from the
+// Hugging Face Hub with the chart's token configured; KServe's
+// storage-initializer reads the token from the pod's ServiceAccount.
+func usesHFTokenServiceAccount(storageURI string) bool {
+	return common.HFTokenSecretName() != "" && strings.HasPrefix(storageURI, "hf://")
+}
+
 // syncPredictor creates or updates the InferenceService and the optional
 // external Service in front of it.
 func (p *Provider) syncPredictor(c *controller.Context) error {
+	comp := c.Instance().Spec.Components[common.ComponentPredictor]
+	var params components.ModelServerCustomSpec
+	c.TryDecodeComponentParameters(comp, &params)
+	if usesHFTokenServiceAccount(params.StorageURI) {
+		if err := ensureModelPullerServiceAccount(c); err != nil {
+			return err
+		}
+	}
+
 	isvc, err := buildInferenceService(c)
 	if err != nil {
 		return err
@@ -266,7 +318,6 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := common.Apply(c.Context(), c.Client(), c.Instance(), isvc); err != nil {
 		return err
 	}
-	comp := c.Instance().Spec.Components[common.ComponentPredictor]
 	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
 }
 
@@ -293,6 +344,8 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 	ready := status.GetCondition(apis.ConditionReady)
 	if ready != nil && ready.IsTrue() {
 		if details := predictorConnectionDetails(c, status); details != nil {
+			// KServe runtimes serve the model under the InferenceService name.
+			details.AdditionalProperties = map[string]string{"model": c.Name()}
 			return controller.ReadyWithConnectionDetails(*details), nil
 		}
 		return controller.Ready(), nil

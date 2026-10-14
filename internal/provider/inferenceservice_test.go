@@ -130,9 +130,9 @@ func TestBuildInferenceService(t *testing.T) {
 		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
 			SchedulingPolicy: policy,
 			Parameters: rawJSON(t, components.ModelServerCustomSpec{
-				ModelFormat: "huggingface",
+				ModelFormat: "sklearn",
 				Env:         []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}},
-				Args:        []string{"--task=text_embedding"},
+				Args:        []string{"--workers=1"},
 			}),
 		})
 
@@ -145,7 +145,7 @@ func TestBuildInferenceService(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := spec.Predictor
-		if !reflect.DeepEqual(got.Model.Env, []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}}) || !reflect.DeepEqual(got.Model.Args, []string{"--task=text_embedding"}) {
+		if !reflect.DeepEqual(got.Model.Env, []corev1.EnvVar{{Name: "OMP_NUM_THREADS", Value: "1"}}) || !reflect.DeepEqual(got.Model.Args, []string{"--workers=1"}) {
 			t.Fatalf("env = %v, args = %v", got.Model.Env, got.Model.Args)
 		}
 		if got.SchedulerName != policy.SchedulerName || !reflect.DeepEqual(got.NodeSelector, policy.NodeSelector) ||
@@ -450,6 +450,54 @@ func TestStatusPredictor(t *testing.T) {
 			if got.ConnectionDetails.URI != tc.wantURI {
 				t.Fatalf("connection details = %+v, want URI %q", got.ConnectionDetails, tc.wantURI)
 			}
+			if tc.wantURI != "" && got.ConnectionDetails.AdditionalProperties["model"] != "iris" {
+				t.Fatalf("model = %q, want the Instance name", got.ConnectionDetails.AdditionalProperties["model"])
+			}
 		})
+	}
+}
+
+func TestPredictorArgs(t *testing.T) {
+	gpu := &corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+	cpu := &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}}
+	cases := []struct {
+		name   string
+		format string
+		args   []string
+		res    *corev1.ResourceRequirements
+		want   []string
+	}{
+		{name: "huggingface on CPU gets the transformers backend", format: "huggingface", args: []string{"--task=text_embedding"}, res: cpu, want: []string{"--task=text_embedding", "--backend=huggingface"}},
+		{name: "no resources counts as CPU", format: "huggingface", want: []string{"--backend=huggingface"}},
+		{name: "huggingface on GPU keeps the runtime default", format: "huggingface", res: gpu},
+		{name: "explicit backend is kept", format: "huggingface", args: []string{"--backend=vllm"}, res: cpu, want: []string{"--backend=vllm"}},
+		{name: "other formats are untouched", format: "sklearn", args: []string{"--workers=1"}, res: cpu, want: []string{"--workers=1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := predictorArgs(tc.format, tc.args, tc.res); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("args = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildInferenceServiceHFTokenServiceAccount(t *testing.T) {
+	t.Setenv("HF_TOKEN_SECRET_NAME", "hf-token")
+	for uri, want := range map[string]string{
+		"hf://sentence-transformers/all-MiniLM-L6-v2": "iris-model-puller",
+		"gs://bucket/iris": "",
+	} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: uri}),
+		})
+		isvc, err := buildInferenceService(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, _ := unstructured.NestedString(isvc.Object, "spec", "predictor", "serviceAccountName")
+		if got != want {
+			t.Fatalf("%s: serviceAccountName = %q, want %q", uri, got, want)
+		}
 	}
 }
