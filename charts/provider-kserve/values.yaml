@@ -101,7 +101,7 @@ provider:
   # -- The name to register for the Provider custom resource
   name: provider-kserve
   # -- Short identifier for the provider, used in resource names
-  # This appears in preset names (e.g., '<shortName>-llm-cpu') and can be
+  # This appears in preset names (e.g., '<shortName>-smollm-cpu') and can be
   # used in other contexts where a short concise provider identifier is needed.
   shortName: kserve
 
@@ -110,7 +110,10 @@ provider:
 # The 'spec' field contains the full InstancePresetSpec.
 # Note: The provider shortName will be automatically added to each preset name.
 presets:
-  - name: llm-cpu
+  # smollm-cpu — a tiny, ungated model on CPU-only nodes. Sized for local
+  # development and smoke tests (k3d/kind/minikube): no GPU required, and the
+  # smallest instruct model in the catalog so it downloads and starts fast.
+  - name: smollm-cpu
     enabled: true
     spec:
       providerRef:
@@ -121,17 +124,28 @@ presets:
         llmEngine:
           type: vllm
           replicas: 1
+          # Size memory generously even for a tiny model: vLLM's CPU runtime
+          # (torch import + compilation) has a multi-GiB floor before the model
+          # and KV cache load, so a tight limit fails vLLM's startup memory
+          # check. Limits are mirrored into requests (Guaranteed QoS).
           resources:
             limits:
-              cpu: "4"
-              memory: 16Gi
+              cpu: "2"
+              memory: 6Gi
           service:
             serviceType: ClusterIP
           parameters:
-            modelURI: hf://Qwen/Qwen2.5-0.5B-Instruct
-            modelName: qwen2.5-0.5b-instruct
+            modelURI: hf://HuggingFaceTB/SmolLM2-135M-Instruct
+            modelName: smollm2-135m-instruct
             computeProfile: cpu
-  - name: llm-gpu
+
+  # qwen-gpu — a small, ungated model on a single GPU. Qwen3-4B (~8 GB in bf16)
+  # fits comfortably on one 16–24 GB card, needs no HuggingFace token, and starts
+  # quickly. CPU/memory are host-side only: the weights and KV cache live in VRAM,
+  # so the host just runs the Python/CUDA process and stages the model during
+  # load. They are set as requests (burstable) — the nvidia.com/gpu limit is the
+  # real gate, so there is no need for a large RAM limit here.
+  - name: qwen-gpu
     enabled: true
     spec:
       providerRef:
@@ -142,17 +156,20 @@ presets:
         llmEngine:
           type: vllm
           replicas: 1
+          # GPU count is set via parameters.gpuCount below (the provider injects
+          # the nvidia.com/gpu limit); cpu/memory are host-side requests only.
           resources:
-            limits:
-              cpu: "4"
-              memory: 16Gi
-              nvidia.com/gpu: "1"
+            requests:
+              cpu: "2"
+              memory: 6Gi
           service:
             serviceType: ClusterIP
           parameters:
-            modelURI: hf://Qwen/Qwen2.5-0.5B-Instruct
-            modelName: qwen2.5-0.5b-instruct
+            modelURI: hf://Qwen/Qwen3-4B
+            modelName: qwen3-4b
             computeProfile: gpu
+            gpuCount: 1
+            tensorParallelSize: 1
 
 # ---------------------------------------------------------------------------
 # LLM model catalog.
@@ -169,50 +186,45 @@ presets:
 # -- Models offered in the llm topology model picker
 models:
   # --- Tiny, CPU-friendly ungated models (run without a GPU) ---
-  - label: "OPT 125M"
-    uri: "hf://facebook/opt-125m"
   - label: "SmolLM2 135M Instruct"
     uri: "hf://HuggingFaceTB/SmolLM2-135M-Instruct"
   - label: "SmolLM2 360M Instruct"
     uri: "hf://HuggingFaceTB/SmolLM2-360M-Instruct"
-  - label: "Qwen2.5 0.5B Instruct"
-    uri: "hf://Qwen/Qwen2.5-0.5B-Instruct"
-  - label: "TinyLlama 1.1B Chat"
-    uri: "hf://TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  - label: "Qwen3 0.6B"
+    uri: "hf://Qwen/Qwen3-0.6B"
+  - label: "Qwen3 1.7B"
+    uri: "hf://Qwen/Qwen3-1.7B"
   # --- Larger ungated models (GPU recommended) ---
-  - label: "Qwen2.5 1.5B Instruct"
-    uri: "hf://Qwen/Qwen2.5-1.5B-Instruct"
-  - label: "Qwen2.5 3B Instruct"
-    uri: "hf://Qwen/Qwen2.5-3B-Instruct"
-  - label: "Qwen2.5 7B Instruct"
-    uri: "hf://Qwen/Qwen2.5-7B-Instruct"
-  - label: "Qwen2.5 32B Instruct"
-    uri: "hf://Qwen/Qwen2.5-32B-Instruct"
-  - label: "Phi-3.5 Mini Instruct"
-    uri: "hf://microsoft/Phi-3.5-mini-instruct"
+  - label: "Qwen3 4B"
+    uri: "hf://Qwen/Qwen3-4B"
+  - label: "Qwen3 8B"
+    uri: "hf://Qwen/Qwen3-8B"
+  - label: "Qwen3 14B"
+    uri: "hf://Qwen/Qwen3-14B"
+  - label: "Qwen3 32B"
+    uri: "hf://Qwen/Qwen3-32B"
+  - label: "Qwen3 30B-A3B (MoE)"
+    uri: "hf://Qwen/Qwen3-30B-A3B"
+  - label: "Phi-4 Mini Instruct"
+    uri: "hf://microsoft/Phi-4-mini-instruct"
+  - label: "Phi-4"
+    uri: "hf://microsoft/phi-4"
+  - label: "Mistral Small 24B Instruct"
+    uri: "hf://mistralai/Mistral-Small-24B-Instruct-2501"
   - label: "DeepSeek-R1 Distill Qwen 7B"
     uri: "hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
   # --- Gated models (require a HuggingFace token + access approval) ---
-  - label: "Llama 3.2 1B Instruct"
-    uri: "hf://meta-llama/Llama-3.2-1B-Instruct"
+  - label: "Llama 4 Scout 17B-16E Instruct"
+    uri: "hf://meta-llama/Llama-4-Scout-17B-16E-Instruct"
     gated: true
-  - label: "Llama 3.2 3B Instruct"
-    uri: "hf://meta-llama/Llama-3.2-3B-Instruct"
+  - label: "Gemma 3 4B Instruct"
+    uri: "hf://google/gemma-3-4b-it"
     gated: true
-  - label: "Llama 3.1 8B Instruct"
-    uri: "hf://meta-llama/Llama-3.1-8B-Instruct"
+  - label: "Gemma 3 12B Instruct"
+    uri: "hf://google/gemma-3-12b-it"
     gated: true
-  - label: "Llama 3.1 70B Instruct"
-    uri: "hf://meta-llama/Llama-3.1-70B-Instruct"
-    gated: true
-  - label: "Mistral 7B Instruct v0.3"
-    uri: "hf://mistralai/Mistral-7B-Instruct-v0.3"
-    gated: true
-  - label: "Mixtral 8x7B Instruct v0.1"
-    uri: "hf://mistralai/Mixtral-8x7B-Instruct-v0.1"
-    gated: true
-  - label: "Gemma 2 9B Instruct"
-    uri: "hf://google/gemma-2-9b-it"
+  - label: "Gemma 3 27B Instruct"
+    uri: "hf://google/gemma-3-27b-it"
     gated: true
 
 # ---------------------------------------------------------------------------
@@ -253,6 +265,14 @@ loraAdapters:
 huggingface:
   # -- Name of the pre-created Secret (with an HF_TOKEN key) for gated downloads
   tokenSecretName: ""
+
+# KServe's storage-initializer is the init container that downloads hf:// and
+# s3:// models into every llm model pod. KServe caps it at 1 CPU / 1Gi memory,
+# which is OOM-killed on multi-GB downloads. Applies to all llm Instances.
+storageInitializer:
+  # -- Resources for the storage-initializer, for example
+  # `{limits: {memory: 4Gi, cpu: "2"}}`. Empty keeps KServe's defaults.
+  resources: {}
 
 # Prometheus Operator metrics scraping. The provider ships no monitoring stack;
 # it only makes model workloads discoverable by an existing Prometheus Operator.
@@ -308,20 +328,37 @@ leaderElection:
 # reconcile them. These bundled controllers do. Toggle any of them off to
 # manage that piece out of band. See Chart.yaml for the dependency wiring.
 #
-# The KServe CRDs are not subchart dependencies: `make helm-deps` vendors them
-# into the chart's crds/ directory, which Helm installs before any templates.
-# Pass `helm install --skip-crds` when the cluster already has the CRDs
-# (shared / BYO-KServe).
+# The KServe CRDs are not packaged in this chart; the kserveCRDs hook Job
+# fetches them at install time (see README).
 # ---------------------------------------------------------------------------
 
+# KServe CRDs fetched over the network at install time. When enabled, a
+# pre-install/pre-upgrade hook Job renders KServe's CRD charts from the registry
+# and server-side applies them, so they exist before the controllers start and
+# are upgraded with every `helm upgrade`. Set install=false when the KServe CRDs
+# are managed elsewhere (for example as KServe's own Helm releases).
+kserveCRDs:
+  # -- Install/upgrade the KServe CRDs from the registry in a hook Job
+  install: true
+  # -- OCI registry holding KServe's CRD charts (override for mirrors)
+  registry: oci://ghcr.io/kserve/charts
+  # -- CRD charts to apply
+  charts:
+    - kserve-crd
+    - kserve-llmisvc-crd
+  # -- CRD chart version; empty uses the bundled kserve-resources chart version
+  version: ""
+
+# -- Image (with helm and kubectl) for the kserveCRDs and kserve-objects hook Jobs
+hookImage: alpine/k8s:1.36.0
+
 # -- cert-manager provides the webhook certificates the KServe controllers
-# require. Both controllers run admission webhooks whose certificates are
-# issued by cert-manager, so it must be present. Set `enabled: false` when the
-# cluster already runs cert-manager (common) — the KServe controllers will then
-# use the existing installation.
+# require, so it must be present. Off by default: most clusters already run it,
+# and installing it in the same release races its CRDs and webhook against the
+# KServe `Issuer` / `Certificate`. Install it first (see README).
 cert-manager:
   # -- Install cert-manager as part of this release
-  enabled: true
+  enabled: false
   # -- Install the cert-manager CRDs (required unless already present)
   crds:
     enabled: true
@@ -334,6 +371,15 @@ kserveResources:
   # -- Deploy the KServe InferenceService controller
   enabled: true
   kserve:
+    # -- KServe image tag (the pinned charts are v0.21.0-rc1; see Chart.yaml)
+    version: v0.21.0
+    # The ClusterStorageContainer is applied by the kserve-objects hook Job;
+    # the ConfigMap and webhook Issuer stay in the release.
+    createSharedResources: false
+    inferenceServiceConfig:
+      enabled: true
+    certManager:
+      enabled: true
     controller:
       # -- Cluster-wide default deployment mode. Standard (formerly named
       # "RawDeployment") yields plain Kubernetes Deployments + HPA and avoids
@@ -347,6 +393,7 @@ kserveLlmisvcResources:
   # -- Deploy the KServe LLMInferenceService controller
   enabled: true
   kserve:
+    version: v0.21.0
     # -- Shared resources are created by kserveResources to avoid duplicate
     # resource conflicts within a single Helm release. If you disable
     # kserveResources but keep this controller, set this to `true` so the
@@ -355,34 +402,21 @@ kserveLlmisvcResources:
     controller:
       deploymentMode: Standard
 
-# -- KServe runtime configurations. Ships the `ClusterServingRuntime`s the
-# InferenceService controller selects from by model format (needed by the
-# predictor topology). The `LLMInferenceServiceConfig` presets are NOT taken
-# from this subchart: upstream hardcodes them to the `kserve` namespace, which
-# would force the whole stack into that namespace. The provider renders them
-# into the release namespace instead (see `llmPresets` below), so
-# `llmisvcConfigs.enabled` is left off here.
+# -- KServe's ClusterServingRuntimes, which the InferenceService controller
+# selects from by model format (needed by the predictor topology). Vendored from
+# the kserve-runtime-configs chart by `make sync-kserve-objects` and applied by
+# the kserve-objects hook Job once the KServe webhooks serve.
 kserveRuntimeConfigs:
-  # -- Deploy the KServe runtime configurations
+  # -- Apply the KServe ClusterServingRuntimes
   enabled: true
-  kserve:
-    # -- LLMInferenceServiceConfig presets. Disabled: the provider renders these
-    # into the release namespace via `llmPresets` to avoid the hardcoded
-    # `kserve` namespace. Do not enable both or the presets collide.
-    llmisvcConfigs:
-      enabled: false
-    # -- ClusterServingRuntimes required by the predictor topology. These are
-    # cluster-scoped, so no namespace rewriting is needed.
-    servingruntime:
-      enabled: true
 
 # -- LLMInferenceServiceConfig presets required by the llm topology (without
 # them it stalls with `ConfigNotFound: kserve-config-llm-template`). These are
 # vendored from KServe under this chart's `files/llmisvcconfigs/` directory (see
-# `make sync-llm-presets`) and rendered into the release namespace, replacing
-# the upstream copies that are hardcoded to the `kserve` namespace. This is what
-# lets the provider run in any namespace. Disable if you manage the presets out
-# of band.
+# `make sync-kserve-objects`) and applied into the release namespace by the
+# kserve-objects hook Job, replacing the upstream copies that are hardcoded to
+# the `kserve` namespace. This is what lets the provider run in any namespace.
+# Disable if you manage the presets out of band.
 llmPresets:
   # -- Render the LLMInferenceServiceConfig presets into the release namespace
   enabled: true
@@ -398,7 +432,7 @@ cpuProfile:
   enabled: true
   # -- CPU-capable vLLM image used by the CPU profile. The bundled GPU presets
   # use a CUDA image that cannot run on CPU nodes, so this must be a CPU build.
-  image: vllm/vllm-openai-cpu:v0.25.1
+  image: vllm/vllm-openai-cpu:v0.31.0
   # -- Default vLLM args applied to the CPU profile's model-server container.
   # These keep vLLM CPU within a modest node: cap the startup memory reservation
   # (--gpu-memory-utilization, which governs CPU memory despite its name), skip
@@ -418,12 +452,15 @@ cpuProfile:
 # ---------------------------------------------------------------------------
 # Optional Envoy AI Gateway.
 #
-# When enabled, the chart installs compatible Envoy Gateway and Envoy AI
-# Gateway controllers and creates one shared Gateway. Individual llm Instances
-# opt in with `spec.topology.parameters.enableAIGateway: true`.
+# `aiGateway.enabled` creates one shared Gateway and turns on the feature in
+# the provider. It does not install controllers: either set
+# `envoy-gateway.enabled` / `envoy-ai-gateway.enabled` below, or bring your own
+# Envoy Gateway (v1.9+, with the extension-manager config below) and Envoy AI
+# Gateway. Individual llm Instances opt in with
+# `spec.topology.parameters.externalAccess: EnvoyAIGateway`.
 # TLS is chart-level (`aiGateway.tls`), not an Instance form field.
 aiGateway:
-  # -- Install and configure the shared Envoy AI Gateway stack
+  # -- Create the shared Gateway and enable the AI Gateway access path
   enabled: false
   # -- Scheme published in Instance connection details
   scheme: http
@@ -437,9 +474,14 @@ aiGateway:
     enabled: false
     # -- DNS name clients use for the Gateway, for example llm.example.com
     hostname: ""
-    # -- Secret populated by cert-manager; empty uses <gateway-name>-tls
+    # -- Secret populated by cert-manager (also the Certificate name); empty uses <gateway-name>-tls
     secretName: ""
-    # -- Existing cert-manager Issuer or ClusterIssuer
+    # -- Add a port-80 listener that only serves cert-manager HTTP-01
+    # challenges (Gateway API solver). Model traffic stays on HTTPS.
+    acmeHTTP01: false
+    # -- Existing cert-manager Issuer or ClusterIssuer. cert-manager must run
+    # with Gateway API support (`config.enableGatewayAPI: true`); it creates
+    # the Certificate from the Gateway's annotations.
     issuerRef:
       name: ""
       kind: ClusterIssuer
@@ -447,9 +489,19 @@ aiGateway:
   gatewayService:
     # -- Envoy proxy Service type (LoadBalancer, NodePort, or ClusterIP)
     type: LoadBalancer
+  auth:
+    # -- Require an API key on every request through the shared Gateway. Each
+    # llm Instance gets a generated key in its connection details (password).
+    enabled: true
+    # -- Allow API keys over a plain HTTP listener (local development only)
+    allowInsecureHTTP: false
 
-# Envoy Gateway subchart configuration required by Envoy AI Gateway v0.4.
+# Envoy Gateway subchart. Off by default: a second Envoy Gateway with the same
+# controllerName would fight an existing one over every Gateway. When you bring
+# your own, apply the same `config.envoyGateway` (extension manager) to it.
 envoy-gateway:
+  # -- Install Envoy Gateway into the release namespace
+  enabled: false
   config:
     envoyGateway:
       gateway:
@@ -481,19 +533,31 @@ envoy-gateway:
           fqdn:
             hostname: ai-gateway-controller
             port: 1063
-      # To enable per-user token quotas, add an existing Redis/Valkey endpoint:
+      # To enable per-key token quotas, add an existing Redis/Valkey endpoint:
       # rateLimit:
       #   backend:
       #     type: Redis
       #     redis:
       #       url: valkey.default.svc.cluster.local:6379
 
-# Both optional controllers are installed into the provider release namespace.
-# This upstream value is supplemented by a release-namespace binding rendered
-# by this chart.
+# Envoy AI Gateway controller and CRDs. Off by default; enable together with
+# `envoy-gateway.enabled` (the extension-manager hostname above assumes both
+# run in the release namespace).
 envoy-ai-gateway:
-  envoyGateway:
-    namespace: default
+  # -- Install the Envoy AI Gateway controller and CRDs into the release namespace
+  enabled: false
+  controller:
+    # Labels GenAI metrics with the authenticated API key ID.
+    metricsRequestHeaderAttributes: "x-openeverest-key-id:openeverest.key.id"
 
 envoy-ai-gateway-crds: {}
+
+# LeaderWorkerSet controller, required for multi-node llm Instances
+# (workerCount + pipelineParallelSize). Off by default: its webhook
+# configurations are cluster-scoped, so it cannot sit next to an existing LWS.
+# Its CRD is installed only by `helm install`; apply it first if you enable this
+# with `helm upgrade`.
+lws:
+  # -- Install the LeaderWorkerSet controller and CRD into the release namespace
+  enabled: false
 

@@ -1,0 +1,37 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-workload
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "1"
+          memory: 2Gi
+      schedulingPolicy:
+        nodeSelector:
+          kubernetes.io/os: linux
+        tolerations:
+          - key: dedicated
+            operator: Equal
+            value: inference
+            effect: NoSchedule
+        topologySpreadConstraints:
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+      parameters:
+        modelFormat: sklearn
+        storageURI: gs://kfserving-examples/models/sklearn/1.0/model
+        env:
+          - name: OMP_NUM_THREADS
+            value: "1"
+        args:
+          - --workers=1

@@ -1,0 +1,161 @@
+{{- $objects := include "provider-kserve.kserveObjects" . | trim }}
+{{- if $objects }}
+{{- $name := printf "%s-kserve-objects" (include "provider-kserve.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $hook := "post-install,post-upgrade" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provider-kserve.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  objects.yaml: |
+{{ $objects | indent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provider-kserve.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "provider-kserve.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["clusterservingruntimes", "clusterstoragecontainers", "llminferenceserviceconfigs"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "provider-kserve.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "provider-kserve.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ $hook }}
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  # Covers the KServe controller image pulls on a fresh cluster.
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: {{ include "provider-kserve.chart" . }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        app.kubernetes.io/component: kserve-objects
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kserve-objects
+          image: {{ .Values.hookImage }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HOME
+              value: /tmp
+            - name: NAMESPACE
+              value: {{ .Release.Namespace }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              # The KServe admission webhooks validate these objects.
+              for d in {{ if .Values.kserveResources.enabled }}kserve-controller-manager{{ end }} {{ if .Values.kserveLlmisvcResources.enabled }}llmisvc-controller-manager{{ end }}; do
+                kubectl -n "${NAMESPACE}" rollout status "deploy/${d}" --timeout=600s
+              done
+              for attempt in $(seq 1 30); do
+                if kubectl apply --server-side --force-conflicts --field-manager=provider-kserve \
+                    -f /objects/objects.yaml; then
+                  exit 0
+                fi
+                echo "Attempt ${attempt} failed (webhook not ready?), retrying in 10s"
+                sleep 10
+              done
+              exit 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: objects
+              mountPath: /objects
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: objects
+          configMap:
+            name: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

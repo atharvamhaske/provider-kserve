@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"fmt"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,35 +13,21 @@ import (
 	"github.com/openeverest/provider-kserve/internal/common"
 )
 
-const (
-	// externalServiceSuffix names the extra Service the provider creates to
-	// publish a model externally when the user selects LoadBalancer or NodePort
-	// (KServe's own workload Service is always ClusterIP and provider-unowned).
-	externalServiceSuffix = "-external"
-)
+// externalServiceSuffix names the extra Service the provider creates to publish
+// a model when the user selects LoadBalancer or NodePort (KServe's own Services
+// are always ClusterIP and provider-unowned).
+const externalServiceSuffix = "-external"
 
 // externalServiceName is the name of the provider-owned external Service.
 func externalServiceName(instance string) string {
 	return instance + externalServiceSuffix
 }
 
-// reconcileExternalService creates a LoadBalancer/NodePort Service selecting the
-// given pods, or deletes a leftover one when the expose type is ClusterIP.
-func reconcileExternalService(c *controller.Context, spec *corev1alpha1.Service, svcType corev1.ServiceType, selector map[string]string, port, targetPort int32) error {
-	if svcType == "" || svcType == corev1.ServiceTypeClusterIP {
-		stale := &corev1.Service{ObjectMeta: c.ObjectMeta(externalServiceName(c.Name()))}
-		return c.Delete(stale)
-	}
-
-	svc := buildExternalService(c, spec, svcType, selector, port, targetPort)
-	return common.Apply(c.Context(), c.Client(), c.Instance(), svc)
-}
-
-// resolveServiceType prefers a topology-level ExternalAccess mapping, then the
-// component Service type, then ClusterIP.
-func resolveServiceType(topoType corev1.ServiceType, spec *corev1alpha1.Service) corev1.ServiceType {
-	if topoType != "" {
-		return topoType
+// resolveServiceType prefers the topology-level externalAccess choice, then the
+// component's service.serviceType, then ClusterIP.
+func resolveServiceType(topologyType corev1.ServiceType, spec *corev1alpha1.Service) corev1.ServiceType {
+	if topologyType != "" {
+		return topologyType
 	}
 	if spec != nil && spec.ServiceType != "" {
 		return spec.ServiceType
@@ -48,8 +35,23 @@ func resolveServiceType(topoType corev1.ServiceType, spec *corev1alpha1.Service)
 	return corev1.ServiceTypeClusterIP
 }
 
+// reconcileExternalService creates the LoadBalancer/NodePort Service fronting
+// the selected pods, or deletes a leftover one when the type is ClusterIP so
+// switching back cleans up.
+func reconcileExternalService(c *controller.Context, spec *corev1alpha1.Service, svcType corev1.ServiceType, selector map[string]string, port, targetPort int32) error {
+	if svcType == corev1.ServiceTypeClusterIP {
+		return deleteExternalService(c)
+	}
+	svc := buildExternalService(c, spec, svcType, selector, port, targetPort)
+	return common.Apply(c.Context(), c.Client(), c.Instance(), svc)
+}
+
+func deleteExternalService(c *controller.Context) error {
+	return c.Delete(&corev1.Service{ObjectMeta: c.ObjectMeta(externalServiceName(c.Name()))})
+}
+
 // buildExternalService builds the LoadBalancer/NodePort Service that fronts the
-// given pods on port/targetPort.
+// selected pods on port, forwarding to targetPort.
 func buildExternalService(c *controller.Context, spec *corev1alpha1.Service, svcType corev1.ServiceType, selector map[string]string, port, targetPort int32) *corev1.Service {
 	meta := c.ObjectMeta(externalServiceName(c.Name()))
 	if spec != nil && len(spec.Annotations) > 0 {
@@ -83,11 +85,11 @@ func buildExternalService(c *controller.Context, spec *corev1alpha1.Service, svc
 }
 
 // externalServiceConnectionDetails derives the endpoint of the provider-owned
-// external Service. Returns nil when the address is not yet assigned.
-func (p *Provider) externalServiceConnectionDetails(c *controller.Context, svcType corev1.ServiceType, port int32) (*controller.ConnectionDetails, error) {
+// external Service. Returns nil while the address is not yet assigned.
+func externalServiceConnectionDetails(c *controller.Context, svcType corev1.ServiceType, port int32) *controller.ConnectionDetails {
 	svc := &corev1.Service{}
 	if err := c.Get(svc, externalServiceName(c.Name())); err != nil {
-		return nil, nil
+		return nil
 	}
 
 	if svcType == corev1.ServiceTypeLoadBalancer {
@@ -98,10 +100,10 @@ func (p *Provider) externalServiceConnectionDetails(c *controller.Context, svcTy
 			}
 			if host != "" {
 				d := kserveConnectionDetails(host, strconv.Itoa(int(port)))
-				return &d, nil
+				return &d
 			}
 		}
-		return nil, nil
+		return nil
 	}
 
 	var nodePort int32
@@ -112,20 +114,22 @@ func (p *Provider) externalServiceConnectionDetails(c *controller.Context, svcTy
 		}
 	}
 	if nodePort == 0 {
-		return nil, nil
+		return nil
 	}
 	host := firstNodeAddress(c)
 	if host == "" {
-		return nil, nil
+		return nil
 	}
 	d := kserveConnectionDetails(host, strconv.Itoa(int(nodePort)))
-	return &d, nil
+	return &d
 }
 
-// firstNodeAddress returns an address for reaching a NodePort Service.
+// firstNodeAddress returns an address for reaching a NodePort Service,
+// preferring an external IP.
 func firstNodeAddress(c *controller.Context) string {
 	nodes := &corev1.NodeList{}
-	if err := c.List(nodes); err != nil {
+	// Nodes are cluster-scoped; c.List would filter them by the Instance namespace.
+	if err := c.Client().List(c.Context(), nodes); err != nil {
 		return ""
 	}
 	var internal string
@@ -153,6 +157,6 @@ func kserveConnectionDetails(host, port string) controller.ConnectionDetails {
 		Provider: common.ProviderName,
 		Host:     host,
 		Port:     port,
-		URI:      "http://" + host + ":" + port,
+		URI:      fmt.Sprintf("http://%s:%s", host, port),
 	}
 }

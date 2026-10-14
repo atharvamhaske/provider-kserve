@@ -1,0 +1,52 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-external-access
+spec:
+  description: |
+    topology.parameters.externalAccess controls the provider-owned
+    <instance>-external Service in front of the predictor pods: LoadBalancer
+    and NodePort create it (80 -> 8080, selecting the predictor pod labels),
+    switching between them updates it, and ClusterIP removes it.
+
+    Only the Service spec is asserted; whether the cluster assigns a load
+    balancer address is environment-specific (k3d has none).
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice,service -o yaml
+  steps:
+    - name: load-balancer
+      try:
+        - apply:
+            file: 00-instance.yaml
+            bindings:
+              - name: externalAccess
+                value: LoadBalancer
+        - assert:
+            file: 00-assert-service.yaml
+            bindings:
+              - name: type
+                value: LoadBalancer
+
+    - name: node-port
+      try:
+        - apply:
+            file: 00-instance.yaml
+            bindings:
+              - name: externalAccess
+                value: NodePort
+        - assert:
+            file: 00-assert-service.yaml
+            bindings:
+              - name: type
+                value: NodePort
+
+    - name: cluster-ip
+      try:
+        - apply:
+            file: 00-instance.yaml
+            bindings:
+              - name: externalAccess
+                value: ClusterIP
+        - error:
+            file: 20-errors.yaml

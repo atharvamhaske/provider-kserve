@@ -1,0 +1,39 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-sklearn
+spec:
+  description: |
+    Serve the KServe sklearn iris example end to end on the default ClusterIP
+    access path: the Instance becomes Ready, its connection Secret points at
+    the in-cluster predictor Service, and a prediction made through that
+    address from inside the cluster returns the expected classes.
+  catch:
+    - script:
+        content: |
+          kubectl -n $NAMESPACE get instance,inferenceservice,pod,service -o wide
+          kubectl -n $NAMESPACE describe pod
+  steps:
+    - name: ready
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-ready.yaml
+
+    - name: predict-through-connection-details
+      try:
+        - script:
+            content: |
+              set -eu
+              secret=$(kubectl -n "$NAMESPACE" get instance test-predictor-sklearn -o jsonpath='{.status.connectionSecretRef.name}')
+              uri=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.uri}' | base64 -d)
+              echo "uri=$uri"
+              kubectl -n "$NAMESPACE" run predict --rm -i --restart=Never --quiet \
+                --image=curlimages/curl:8.11.1 -- \
+                curl -sf -X POST "$uri/v1/models/test-predictor-sklearn:predict" \
+                -H 'Content-Type: application/json' \
+                -d '{"instances":[[6.8,2.8,4.8,1.4],[6.0,3.4,4.5,1.6]]}'
+            check:
+              ($error): ~
+              (contains($stdout, '"predictions":[1,1]')): true

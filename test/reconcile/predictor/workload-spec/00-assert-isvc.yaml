@@ -1,0 +1,30 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: test-predictor-workload
+spec:
+  predictor:
+    nodeSelector:
+      kubernetes.io/os: linux
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: inference
+        effect: NoSchedule
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            core.openeverest.io/provider: provider-kserve
+            core.openeverest.io/instance: test-predictor-workload
+            core.openeverest.io/component: predictor
+    model:
+      modelFormat:
+        name: sklearn
+      env:
+        - name: OMP_NUM_THREADS
+          value: "1"
+      args:
+        - --workers=1

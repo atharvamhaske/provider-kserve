@@ -73,6 +73,13 @@ type VllmCustomSpec struct {
 	// CUDA presets. This is a convenience over setting baseRefs directly.
 	ComputeProfile string `json:"computeProfile,omitempty"`
 
+	// GpuCount is the number of GPUs (nvidia.com/gpu) each vLLM pod requests
+	// (head and every worker). The GPU presets carry no GPU limit, so the provider
+	// injects this into the model container's resource limits; without it the pod
+	// schedules onto any node and vLLM fails to find a device. Defaults to 1 on
+	// the GPU profile. Leave unset for the CPU profile. Must be >= tensorParallelSize.
+	GpuCount *int32 `json:"gpuCount,omitempty"`
+
 	// KVCacheSpaceGi overrides VLLM_CPU_KVCACHE_SPACE (GiB) for the CPU profile.
 	// Left unset, vLLM auto-sizes the KV cache from the memory that is free at
 	// startup (recommended), which adapts to the node. Set it only to cap the KV
@@ -129,6 +136,16 @@ type VllmCustomSpec struct {
 	// ScalingActuator selects the WVA actuator backend: "keda" (default) or "hpa".
 	// KEDA queries Prometheus directly; HPA needs a Prometheus Adapter.
 	ScalingActuator string `json:"scalingActuator,omitempty"`
+
+	// WorkerCount is the number of extra worker pods besides the head for a
+	// pipeline-parallel multi-node model. Presence turns on
+	// LLMInferenceService.spec.worker. Must equal pipelineParallelSize - 1.
+	// PipelineParallelSize alone does not create workers.
+	WorkerCount *int32 `json:"workerCount,omitempty"`
+
+	// WorkerResources are optional CPU/memory/GPU requests for worker pods.
+	// Unset copies llmEngine.resources. Setting this without WorkerCount is an error.
+	WorkerResources *corev1.ResourceRequirements `json:"workerResources,omitempty"`
 }
 
 const (
@@ -173,15 +190,17 @@ type ModelServerCustomSpec struct {
 	// MaxReplicas is the autoscaling ceiling.
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
-	// Env is appended to the predictor container (e.g. OMP_NUM_THREADS).
+	// StorageContainer names a ClusterStorageContainer. When set, KServe uses
+	// that initializer instead of matching on the storage URI scheme
+	// (spec.predictor.storageContainerName), e.g. one with a larger memory limit
+	// for big models. It must exist, be enabled, and support StorageURI.
+	StorageContainer string `json:"storageContainer,omitempty"`
+
+	// Env is added to the model server container (e.g. OMP_NUM_THREADS, or
+	// HF_TOKEN from a Secret via valueFrom).
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// Args is appended to the serving-runtime command (e.g. Triton flags).
+	// Args is appended to the serving runtime's arguments (e.g.
+	// --task=text_embedding for the huggingface runtime).
 	Args []string `json:"args,omitempty"`
-
-	// NodeSelector constrains predictor pods to matching nodes.
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Tolerations allow predictor pods to schedule onto tainted nodes.
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }

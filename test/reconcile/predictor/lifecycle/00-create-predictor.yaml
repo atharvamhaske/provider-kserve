@@ -22,15 +22,3 @@ spec:
         storageURI: gs://kfserving-examples/models/sklearn/1.0/model
         minReplicas: 1
         maxReplicas: 3
-        env:
-          - name: OMP_NUM_THREADS
-            value: "1"
-        args:
-          - --strict-model-config=false
-        nodeSelector:
-          kubernetes.io/os: linux
-        tolerations:
-          - key: dedicated
-            operator: Equal
-            value: inference
-            effect: NoSchedule

@@ -3,15 +3,19 @@ package provider
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"knative.dev/pkg/apis"
-
-	kservev1beta1 "github.com/kserve/kserve/pkg/apis/serving/v1beta1"
-	kserveconstants "github.com/kserve/kserve/pkg/constants"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
@@ -20,22 +24,99 @@ import (
 	"github.com/openeverest/provider-kserve/internal/common"
 )
 
+// The KServe v1beta1 Go package does not build against the k8s.io/api version
+// OpenEverest requires, so the InferenceService fields the provider sets are
+// mirrored here and applied as an unstructured object.
+var inferenceServiceGVK = schema.GroupVersionKind{
+	Group: "serving.kserve.io", Version: "v1beta1", Kind: "InferenceService",
+}
+
+type inferenceServiceSpec struct {
+	Predictor predictorSpec `json:"predictor"`
+}
+
+type predictorSpec struct {
+	MinReplicas               *int32                            `json:"minReplicas,omitempty"`
+	MaxReplicas               int32                             `json:"maxReplicas,omitempty"`
+	Labels                    map[string]string                 `json:"labels,omitempty"`
+	StorageContainerName      string                            `json:"storageContainerName,omitempty"`
+	SchedulerName             string                            `json:"schedulerName,omitempty"`
+	NodeSelector              map[string]string                 `json:"nodeSelector,omitempty"`
+	Affinity                  *corev1.Affinity                  `json:"affinity,omitempty"`
+	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	Model                     *modelSpec                        `json:"model,omitempty"`
+}
+
+type modelSpec struct {
+	ModelFormat    modelFormat                  `json:"modelFormat"`
+	Runtime        string                       `json:"runtime,omitempty"`
+	StorageURI     string                       `json:"storageUri,omitempty"`
+	RuntimeVersion string                       `json:"runtimeVersion,omitempty"`
+	Resources      *corev1.ResourceRequirements `json:"resources,omitempty"`
+	Env            []corev1.EnvVar              `json:"env,omitempty"`
+	Args           []string                     `json:"args,omitempty"`
+}
+
+type modelFormat struct {
+	Name string `json:"name"`
+}
+
+type inferenceServiceStatus struct {
+	duckv1.Status `json:",inline"`
+	Address       *duckv1.Addressable `json:"address,omitempty"`
+}
+
 const (
-	// predictorContainerPort is the HTTP port KServe runtimes listen on.
+	// predictorServicePort is the port of KServe's in-cluster predictor Service
+	// in Standard mode; it forwards to predictorContainerPort, where KServe
+	// runtimes listen.
+	predictorServicePort   = 80
 	predictorContainerPort = 8080
-	// predictorServicePort is the port KServe's in-cluster predictor Service
-	// exposes (CommonDefaultHttpPort). The provider-owned external Service
-	// uses the same mapping: 80 → 8080.
-	predictorServicePort = 80
 )
 
-// predictorPodSelector returns the label selector KServe stamps on Standard-mode
-// InferenceService predictor pods. Keep in sync with GetRawServiceLabel +
-// PredictorServiceName.
-func predictorPodSelector(instance string) map[string]string {
-	return map[string]string{
-		"app": kserveconstants.GetRawServiceLabel(kserveconstants.PredictorServiceName(instance)),
+// KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
+// ClusterStorageContainer fields validation reads are mirrored here too.
+var clusterStorageContainerGVK = schema.GroupVersionKind{
+	Group: "serving.kserve.io", Version: "v1alpha1", Kind: "ClusterStorageContainer",
+}
+
+const storageContainerWorkloadInitContainer = "initContainer"
+
+type clusterStorageContainer struct {
+	Spec     storageContainerSpec `json:"spec"`
+	Disabled *bool                `json:"disabled,omitempty"`
+}
+
+type storageContainerSpec struct {
+	SupportedURIFormats []supportedURIFormat `json:"supportedUriFormats"`
+	WorkloadType        string               `json:"workloadType,omitempty"`
+}
+
+type supportedURIFormat struct {
+	Prefix string `json:"prefix,omitempty"`
+	Regex  string `json:"regex,omitempty"`
+}
+
+// supports mirrors KServe's StorageContainerSpec.IsStorageUriSupported.
+func (s storageContainerSpec) supports(uri string) (bool, error) {
+	for _, f := range s.SupportedURIFormats {
+		switch {
+		case f.Prefix != "":
+			if strings.HasPrefix(uri, f.Prefix) {
+				return true, nil
+			}
+		case f.Regex != "":
+			match, err := regexp.MatchString(f.Regex, uri)
+			if err != nil {
+				return false, err
+			}
+			if match {
+				return true, nil
+			}
+		}
 	}
+	return false, nil
 }
 
 // validatePredictor checks the Instance spec for the predictor topology.
@@ -56,11 +137,16 @@ func validatePredictor(c *controller.Context) error {
 	if params.MinReplicas != nil && *params.MinReplicas < 0 {
 		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
 	}
+	if params.StorageContainer != "" {
+		if err := validateStorageContainer(c, params.StorageContainer, params.StorageURI); err != nil {
+			return fmt.Errorf("%s.parameters.storageContainer: %w", common.ComponentPredictor, err)
+		}
+	}
 	if comp.Service != nil {
 		switch comp.Service.ServiceType {
 		case "", corev1.ServiceTypeClusterIP, corev1.ServiceTypeLoadBalancer, corev1.ServiceTypeNodePort:
 		default:
-			return fmt.Errorf("%s.service.serviceType must be one of ClusterIP, LoadBalancer or NodePort", common.ComponentPredictor)
+			return fmt.Errorf("%s.service.serviceType must be ClusterIP, LoadBalancer or NodePort", common.ComponentPredictor)
 		}
 	}
 
@@ -69,13 +155,50 @@ func validatePredictor(c *controller.Context) error {
 	switch topo.ExternalAccess {
 	case "", predictor.ExternalAccessClusterIP, predictor.ExternalAccessLoadBalancer, predictor.ExternalAccessNodePort:
 	default:
-		return fmt.Errorf("externalAccess must be one of ClusterIP, LoadBalancer or NodePort")
+		return fmt.Errorf("topology.parameters.externalAccess must be ClusterIP, LoadBalancer or NodePort")
+	}
+	return nil
+}
+
+// validateStorageContainer mirrors the checks KServe's pod webhook runs on a
+// named ClusterStorageContainer; failing them there leaves the Instance stuck
+// provisioning with the error only in ReplicaSet events.
+func validateStorageContainer(c *controller.Context, name, storageURI string) error {
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("invalid name %q: %s", name, strings.Join(errs, "; "))
+	}
+
+	obj := unstructuredObject(clusterStorageContainerGVK)
+	if err := c.Client().Get(c.Context(), client.ObjectKey{Name: name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("ClusterStorageContainer %q not found", name)
+		}
+		return fmt.Errorf("getting ClusterStorageContainer %q: %w", name, err)
+	}
+	var csc clusterStorageContainer
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &csc); err != nil {
+		return fmt.Errorf("decoding ClusterStorageContainer %q: %w", name, err)
+	}
+
+	if csc.Disabled != nil && *csc.Disabled {
+		return fmt.Errorf("ClusterStorageContainer %q is disabled", name)
+	}
+	// KServe defaults an empty workloadType to initContainer.
+	if wt := csc.Spec.WorkloadType; wt != "" && wt != storageContainerWorkloadInitContainer {
+		return fmt.Errorf("ClusterStorageContainer %q has workloadType %q, want %q", name, wt, storageContainerWorkloadInitContainer)
+	}
+	supported, err := csc.Spec.supports(storageURI)
+	if err != nil {
+		return fmt.Errorf("ClusterStorageContainer %q: %w", name, err)
+	}
+	if !supported {
+		return fmt.Errorf("ClusterStorageContainer %q does not support storageURI %q", name, storageURI)
 	}
 	return nil
 }
 
 // buildInferenceService translates an Instance into an InferenceService.
-func buildInferenceService(c *controller.Context) (*kservev1beta1.InferenceService, error) {
+func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, error) {
 	comp := c.Instance().Spec.Components[common.ComponentPredictor]
 
 	var params components.ModelServerCustomSpec
@@ -85,48 +208,34 @@ func buildInferenceService(c *controller.Context) (*kservev1beta1.InferenceServi
 		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
 	}
 
-	model := &kservev1beta1.ModelSpec{
-		ModelFormat: kservev1beta1.ModelFormat{Name: params.ModelFormat},
-	}
-	if params.StorageURI != "" {
-		model.StorageURI = ptr.To(params.StorageURI)
-	}
-	if params.RuntimeVersion != "" {
-		model.RuntimeVersion = ptr.To(params.RuntimeVersion)
-	}
-	if params.Runtime != "" {
-		model.Runtime = ptr.To(params.Runtime)
-	}
-	if comp.Resources != nil {
-		model.Resources = *comp.Resources
-	}
-	if len(params.Env) > 0 {
-		model.Env = params.Env
-	}
-	if len(params.Args) > 0 {
-		model.Args = params.Args
-	}
-
-	predictorSpec := kservev1beta1.PredictorSpec{Model: model}
-	if len(params.NodeSelector) > 0 {
-		predictorSpec.NodeSelector = params.NodeSelector
-	}
-	if len(params.Tolerations) > 0 {
-		predictorSpec.Tolerations = params.Tolerations
-	}
-	if comp.Affinity != nil {
-		predictorSpec.Affinity = comp.Affinity
+	predictor := predictorSpec{Model: &modelSpec{
+		ModelFormat:    modelFormat{Name: params.ModelFormat},
+		Runtime:        params.Runtime,
+		StorageURI:     params.StorageURI,
+		RuntimeVersion: params.RuntimeVersion,
+		Resources:      comp.Resources,
+		Env:            params.Env,
+		Args:           params.Args,
+	}}
+	predictor.Labels = c.PodLabels(common.ComponentPredictor)
+	if policy := comp.SchedulingPolicy; policy != nil {
+		predictor.SchedulerName = policy.SchedulerName
+		predictor.NodeSelector = policy.NodeSelector
+		predictor.Affinity = policy.Affinity
+		predictor.Tolerations = policy.Tolerations
+		predictor.TopologySpreadConstraints = controller.TopologySpreadConstraints(policy, predictor.Labels)
 	}
 
 	switch {
 	case params.MinReplicas != nil:
-		predictorSpec.MinReplicas = params.MinReplicas
+		predictor.MinReplicas = params.MinReplicas
 	case comp.Replicas != nil:
-		predictorSpec.MinReplicas = comp.Replicas
+		predictor.MinReplicas = comp.Replicas
 	}
 	if params.MaxReplicas != nil {
-		predictorSpec.MaxReplicas = *params.MaxReplicas
+		predictor.MaxReplicas = *params.MaxReplicas
 	}
+	predictor.StorageContainerName = params.StorageContainer
 
 	meta := c.ObjectMeta(c.Name())
 	if meta.Annotations == nil {
@@ -134,15 +243,21 @@ func buildInferenceService(c *controller.Context) (*kservev1beta1.InferenceServi
 	}
 	meta.Annotations[common.DeploymentModeAnnotation] = common.DeploymentModeStandard
 
-	return &kservev1beta1.InferenceService{
-		ObjectMeta: meta,
-		Spec: kservev1beta1.InferenceServiceSpec{
-			Predictor: predictorSpec,
-		},
-	}, nil
+	spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&inferenceServiceSpec{Predictor: predictor})
+	if err != nil {
+		return nil, fmt.Errorf("building InferenceService spec: %w", err)
+	}
+	isvc := unstructuredObject(inferenceServiceGVK)
+	isvc.SetName(meta.Name)
+	isvc.SetNamespace(meta.Namespace)
+	isvc.SetLabels(meta.Labels)
+	isvc.SetAnnotations(meta.Annotations)
+	isvc.Object["spec"] = spec
+	return isvc, nil
 }
 
-// syncPredictor creates or updates the InferenceService and optional external Service.
+// syncPredictor creates or updates the InferenceService and the optional
+// external Service in front of it.
 func (p *Provider) syncPredictor(c *controller.Context) error {
 	isvc, err := buildInferenceService(c)
 	if err != nil {
@@ -151,42 +266,33 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := common.Apply(c.Context(), c.Client(), c.Instance(), isvc); err != nil {
 		return err
 	}
-	return ensurePredictorExternalService(c)
-}
-
-func ensurePredictorExternalService(c *controller.Context) error {
 	comp := c.Instance().Spec.Components[common.ComponentPredictor]
-	return reconcileExternalService(
-		c,
-		comp.Service,
-		predictorServiceType(c),
-		predictorPodSelector(c.Name()),
-		predictorServicePort,
-		predictorContainerPort,
-	)
+	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
 }
 
 func predictorServiceType(c *controller.Context) corev1.ServiceType {
-	comp := c.Instance().Spec.Components[common.ComponentPredictor]
 	var topo predictor.PredictorTopologyParameters
 	c.TryDecodeTopologyParameters(&topo)
-	return resolveServiceType(topo.ResolvedServiceType(), comp.Service)
+	return resolveServiceType(topo.ResolvedServiceType(), c.Instance().Spec.Components[common.ComponentPredictor].Service)
 }
 
 // statusPredictor translates the InferenceService status into a provider Status.
 func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, error) {
-	isvc := &kservev1beta1.InferenceService{}
+	isvc := unstructuredObject(inferenceServiceGVK)
 	if err := c.Get(isvc, c.Name()); err != nil {
 		return controller.Provisioning("Waiting for InferenceService"), nil
 	}
 
-	ready := isvc.Status.GetCondition(apis.ConditionReady)
-	if ready != nil && ready.IsTrue() {
-		details, err := p.predictorConnectionDetails(c, isvc)
-		if err != nil {
-			return controller.Provisioning(err.Error()), nil
+	var status inferenceServiceStatus
+	if raw, ok := isvc.Object["status"].(map[string]any); ok {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &status); err != nil {
+			return controller.Status{}, fmt.Errorf("decoding InferenceService status: %w", err)
 		}
-		if details != nil {
+	}
+
+	ready := status.GetCondition(apis.ConditionReady)
+	if ready != nil && ready.IsTrue() {
+		if details := predictorConnectionDetails(c, status); details != nil {
 			return controller.ReadyWithConnectionDetails(*details), nil
 		}
 		return controller.Ready(), nil
@@ -200,23 +306,22 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 	return controller.Provisioning(conditionMessage(ready, "InferenceService is being created")), nil
 }
 
-// predictorConnectionDetails resolves how to reach a Ready InferenceService.
-// LoadBalancer/NodePort win over KServe Status.URL so the provider-owned
-// Service address is what clients see. Returns nil (Ready without details)
-// when that external address is not assigned yet.
-func (p *Provider) predictorConnectionDetails(c *controller.Context, isvc *kservev1beta1.InferenceService) (*controller.ConnectionDetails, error) {
-	svcType := predictorServiceType(c)
-	switch svcType {
-	case corev1.ServiceTypeLoadBalancer, corev1.ServiceTypeNodePort:
-		return p.externalServiceConnectionDetails(c, svcType, predictorServicePort)
+// predictorConnectionDetails picks the address clients should use: the
+// provider-owned external Service when one is requested (nil until it has an
+// address), otherwise KServe's in-cluster predictor Service. status.url is
+// ignored: KServe derives it from its ingress domain (example.com by default)
+// whether or not any ingress serves it.
+func predictorConnectionDetails(c *controller.Context, status inferenceServiceStatus) *controller.ConnectionDetails {
+	if svcType := predictorServiceType(c); svcType != corev1.ServiceTypeClusterIP {
+		return externalServiceConnectionDetails(c, svcType, predictorServicePort)
 	}
-	if isvc.Status.URL != nil {
-		d := connectionDetails(isvc.Status.URL)
-		return &d, nil
+	if status.Address != nil && status.Address.URL != nil {
+		d := connectionDetails(status.Address.URL)
+		return &d
 	}
-	host := fmt.Sprintf("%s.%s.svc.cluster.local", kserveconstants.PredictorServiceName(c.Name()), c.Namespace())
+	host := fmt.Sprintf("%s-predictor.%s.svc.cluster.local", c.Name(), c.Namespace())
 	d := kserveConnectionDetails(host, strconv.Itoa(predictorServicePort))
-	return &d, nil
+	return &d
 }
 
 // connectionDetails builds ConnectionDetails from a KServe status URL.

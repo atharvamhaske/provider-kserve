@@ -1,16 +1,12 @@
-# Switch the same Instance to LoadBalancer so the provider creates an owned
-# external Service in front of the InferenceService predictor pods.
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
-  name: test-kserve-predictor
+  name: test-predictor-csc
 spec:
   providerRef:
     name: provider-kserve
   topology:
     type: predictor
-    parameters:
-      externalAccess: LoadBalancer
   components:
     predictor:
       type: modelServer
@@ -22,5 +18,4 @@ spec:
       parameters:
         modelFormat: sklearn
         storageURI: gs://kfserving-examples/models/sklearn/1.0/model
-        minReplicas: 1
-        maxReplicas: 3
+        storageContainer: chainsaw-predictor-init

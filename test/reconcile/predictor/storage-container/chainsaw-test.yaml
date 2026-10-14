@@ -1,0 +1,47 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-storage-container
+spec:
+  description: |
+    predictor.parameters.storageContainer pins a ClusterStorageContainer.
+
+    The provider must copy it to spec.predictor.storageContainerName, and
+    KServe must then build the model pod's storage-initializer from that
+    container (asserted through its 2Gi memory limit; the chart's `default`
+    container has 1Gi). A reference to a missing ClusterStorageContainer must
+    fail validation instead of creating an InferenceService whose pods KServe's
+    webhook would reject, and must recover once the container exists.
+  catch:
+    - script:
+        content: |
+          kubectl -n $NAMESPACE get instance,inferenceservice,pod -o yaml
+          kubectl get clusterstoragecontainer -o yaml
+  steps:
+    - name: pinned-storage-container
+      try:
+        - apply:
+            file: 00-storage-container.yaml
+        - apply:
+            file: 01-instance.yaml
+        - assert:
+            file: 01-assert-isvc.yaml
+        - assert:
+            timeout: 2m
+            file: 01-assert-pod.yaml
+
+    - name: missing-storage-container
+      try:
+        - apply:
+            file: 10-instance-missing.yaml
+        - assert:
+            file: 10-assert-failed.yaml
+        - error:
+            file: 10-errors.yaml
+
+    - name: storage-container-created-later
+      try:
+        - apply:
+            file: 11-storage-container.yaml
+        - assert:
+            file: 11-assert-isvc.yaml

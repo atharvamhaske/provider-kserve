@@ -227,6 +227,7 @@ jobs:
           Platforms: \`linux/amd64\`, \`linux/arm64\`
 
           ### Install with Helm
+          Requires cert-manager. Installs the KServe CRDs, controllers and the provider:
           \`\`\`bash
           helm install provider-kserve \\
             oci://${REGISTRY}/${{ github.repository_owner }}/charts/provider-kserve \\

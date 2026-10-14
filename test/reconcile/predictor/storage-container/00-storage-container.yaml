@@ -1,0 +1,20 @@
+# A storage-initializer with more memory than the chart's `default` (1Gi), the
+# typical reason to pin one: large models OOM-kill the default initializer.
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterStorageContainer
+metadata:
+  name: chainsaw-predictor-init
+spec:
+  container:
+    name: storage-initializer
+    image: kserve/storage-initializer:v0.21.0
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+  supportedUriFormats:
+    - prefix: gs://
+  workloadType: initContainer
