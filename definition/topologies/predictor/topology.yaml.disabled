@@ -55,6 +55,17 @@ ui:
           path: spec.components.predictor.parameters.runtimeVersion
           fieldParams:
             label: Runtime Version
+        storageContainer:
+          uiType: text
+          path: spec.components.predictor.parameters.storageContainer
+          fieldParams:
+            label: Storage Container
+      componentsOrder:
+      - version
+      - modelFormat
+      - storageURI
+      - runtimeVersion
+      - storageContainer
     scaling:
       label: Scaling
       description: Configure autoscaling bounds for the predictor.
@@ -75,29 +86,28 @@ ui:
           validation:
             min: 0
             max: 32
-    observability:
-      label: Observability
+    routing:
+      label: Routing
       description: >-
-        Configure Prometheus metrics for this predictor (per-instance
-        PodMonitor). Requires Prometheus Operator in the cluster.
+        How clients reach the model. ClusterIP stays in-cluster; LoadBalancer
+        and NodePort create a Service in front of the predictor pods.
       components:
-        enableMetrics:
+        externalAccess:
           uiType: select
-          path: spec.topology.parameters.enableMetrics
+          path: spec.topology.parameters.externalAccess
           fieldParams:
-            label: Prometheus metrics
-            defaultValue: "true"
-            helperText: >-
-              Emits a PodMonitor for this instance's predictor /metrics
-              endpoint (port 8080). Requires Prometheus Operator in the cluster.
+            label: External access
+            defaultValue: ClusterIP
             options:
-            - label: Enabled
-              value: "true"
-            - label: Disabled
-              value: "false"
+            - label: ClusterIP
+              value: ClusterIP
+            - label: LoadBalancer
+              value: LoadBalancer
+            - label: NodePort
+              value: NodePort
       componentsOrder:
-      - enableMetrics
+      - externalAccess
   sectionsOrder:
   - basicInfo
   - scaling
-  - observability
+  - routing

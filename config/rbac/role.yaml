@@ -14,6 +14,7 @@ rules:
   resources:
   - configmaps
   - nodes
+  - pods
   verbs:
   - get
   - list
@@ -105,6 +106,7 @@ rules:
   - gateway.envoyproxy.io
   resources:
   - backendtrafficpolicies
+  - securitypolicies
   verbs:
   - create
   - delete
@@ -133,6 +135,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - serving.kserve.io
+  resources:
+  - clusterstoragecontainers
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - serving.kserve.io
