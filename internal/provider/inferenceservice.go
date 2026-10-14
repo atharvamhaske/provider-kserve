@@ -266,6 +266,11 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := common.Apply(c.Context(), c.Client(), c.Instance(), isvc); err != nil {
 		return err
 	}
+	var topo predictor.PredictorTopologyParameters
+	c.TryDecodeTopologyParameters(&topo)
+	if err := syncPodMonitor(c, topo.MetricsEnabled(), buildPredictorPodMonitor(c.Name(), c.Instance().Namespace, c.PodLabels(common.ComponentPredictor), common.PodMonitorInterval())); err != nil {
+		return err
+	}
 	comp := c.Instance().Spec.Components[common.ComponentPredictor]
 	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
 }

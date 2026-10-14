@@ -270,16 +270,11 @@ tolerations, topology spread constraints) is applied to the predictor pods.
 | Field | Type | Description |
 |---|---|---|
 | `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, or `NodePort`. Takes precedence over `predictor.service.serviceType`. |
+| `enableMetrics` | bool | Emit a PodMonitor for the predictor pods. Defaults to enabled. |
 
 With `LoadBalancer` or `NodePort` the provider creates `<instance>-external` (port 80 → 8080)
 and publishes its address as the connection details. With `ClusterIP` they point at KServe's
 in-cluster `<instance>-predictor` Service.
-
-### `predictor` topology parameters
-
-| Field | Type | Description |
-|---|---|---|
-| `enableMetrics` | bool | Emit a PodMonitor for this instance's predictor pods (`:8080/metrics`). Defaults to enabled. |
 
 ### `llm` topology parameters
 
@@ -645,8 +640,9 @@ replaces. With one replica this means a short outage per rollout.
 ### Observability
 
 Each `llm` Instance gets a `PodMonitor` so an existing Prometheus Operator scrapes vLLM's
-`:8000/metrics`. Each `predictor` Instance gets one for the Standard-mode runtime
-`:8080/metrics`. Both are on by default and safely skipped when the `monitoring.coreos.com`
+`:8000/metrics`. Each `predictor` Instance gets one for the metrics port and path the serving
+runtime declares (`:8080/metrics` for most, Triton `:8002`, TorchServe `:8082`). Both are on by
+default and safely skipped when the `monitoring.coreos.com`
 CRDs are absent. See [docs/observability.md](docs/observability.md) and the
 [vLLM Grafana dashboard](docs/dashboards/vllm.json).
 
