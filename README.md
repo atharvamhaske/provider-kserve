@@ -264,6 +264,11 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
 | `task` | string | Hugging Face runtime task (`--task`), e.g. `text_embedding`. Only with `modelFormat: huggingface`; a `--task` in `args` wins. |
 | `gpuCount` | int32 | GPUs (`nvidia.com/gpu`) per predictor pod. Unset takes the catalog entry's value; `0` runs on CPU. |
+| `serviceAccountName` | string | ServiceAccount the predictor pods run as (e.g. one bound to cloud IAM). Empty uses the namespace default. |
+| `labels` | map | Added to the InferenceService; KServe copies them to the pods. Provider-managed keys are rejected. |
+| `annotations` | map | Added to the InferenceService; KServe copies them to the pods. `serving.kserve.io/deploymentMode` is rejected. |
+| `securityContext` | PodSecurityContext | Pod-level security context. |
+| `containerSecurityContext` | SecurityContext | Security context of the model server container. |
 
 Resource requests default to the limits: otherwise KServe fills in the serving runtime's
 requests (2Gi memory for most runtimes), which a lower limit would make invalid.

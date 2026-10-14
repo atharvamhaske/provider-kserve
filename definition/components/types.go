@@ -219,4 +219,24 @@ type ModelServerCustomSpec struct {
 	// GpuCount is the number of GPUs (nvidia.com/gpu) each predictor pod
 	// requests. Unset takes the catalog entry's value; 0 runs on CPU.
 	GpuCount *int32 `json:"gpuCount,omitempty"`
+
+	// ServiceAccountName is the ServiceAccount the predictor pods run as (e.g.
+	// one bound to cloud IAM for model downloads). Empty uses the namespace
+	// default.
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// Labels are added to the InferenceService; KServe copies them to the
+	// predictor pods. Keys the provider manages are rejected.
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations are added to the InferenceService; KServe copies them to
+	// the predictor pods. serving.kserve.io/deploymentMode is rejected.
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// SecurityContext is the predictor pod's security context.
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// ContainerSecurityContext is the model server container's security
+	// context.
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }

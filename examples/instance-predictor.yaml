@@ -57,6 +57,13 @@ spec:
         #     value: "1"
         # args:
         #   - --strict-model-config=false
+        # serviceAccountName: model-reader
+        # labels:
+        #   cost-center: ml
+        # securityContext:
+        #   runAsNonRoot: true
+        # containerSecurityContext:
+        #   allowPrivilegeEscalation: false
       # schedulingPolicy:
       #   nodeSelector:
       #     kubernetes.io/os: linux

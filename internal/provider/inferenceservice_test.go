@@ -163,6 +163,75 @@ func TestBuildInferenceService(t *testing.T) {
 	})
 }
 
+func TestBuildInferenceServiceIdentity(t *testing.T) {
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+		Parameters: rawJSON(t, components.ModelServerCustomSpec{
+			ModelFormat:              "sklearn",
+			ServiceAccountName:       "model-reader",
+			Labels:                   map[string]string{"cost-center": "ml"},
+			Annotations:              map[string]string{"sidecar.istio.io/inject": "false"},
+			SecurityContext:          &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
+			ContainerSecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(false)},
+		}),
+	})
+
+	isvc, err := buildInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := isvc.GetLabels()
+	if labels["cost-center"] != "ml" || labels[controller.ProviderLabel] != common.ProviderName || labels["app.kubernetes.io/managed-by"] != "everest" {
+		t.Fatalf("labels = %v, want the user label next to the provider labels", labels)
+	}
+	annotations := isvc.GetAnnotations()
+	if annotations["sidecar.istio.io/inject"] != "false" || annotations[common.DeploymentModeAnnotation] != common.DeploymentModeStandard {
+		t.Fatalf("annotations = %v", annotations)
+	}
+
+	var spec inferenceServiceSpec
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(isvc.Object["spec"].(map[string]any), &spec); err != nil {
+		t.Fatal(err)
+	}
+	p := spec.Predictor
+	if p.ServiceAccountName != "model-reader" || p.SecurityContext == nil || !*p.SecurityContext.RunAsNonRoot ||
+		p.Model.SecurityContext == nil || *p.Model.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("predictor = %+v, model security context = %+v", p, p.Model.SecurityContext)
+	}
+}
+
+func TestValidatePredictorMetadata(t *testing.T) {
+	cases := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		wantErr     string
+	}{
+		{name: "valid", labels: map[string]string{"team": "ml"}, annotations: map[string]string{"example.com/owner": "ml"}},
+		{name: "provider label", labels: map[string]string{controller.InstanceLabel: "other"}, wantErr: `"core.openeverest.io/instance" is managed by the provider`},
+		{name: "ownership label", labels: map[string]string{"app.kubernetes.io/managed-by": "me"}, wantErr: `"app.kubernetes.io/managed-by" is managed by the provider`},
+		{name: "invalid label value", labels: map[string]string{"team": "has spaces"}, wantErr: `invalid label "team"`},
+		{name: "deployment mode annotation", annotations: map[string]string{common.DeploymentModeAnnotation: "Serverless"}, wantErr: "is managed by the provider"},
+		{name: "invalid annotation key", annotations: map[string]string{"bad key": "x"}, wantErr: `invalid key "bad key"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+				Parameters: rawJSON(t, components.ModelServerCustomSpec{
+					ModelFormat: "sklearn", StorageURI: "gs://bucket/iris",
+					Labels: tc.labels, Annotations: tc.annotations,
+				}),
+			})
+			err := validatePredictor(c)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidatePredictorExternalAccess(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -641,20 +710,23 @@ func TestValidatePredictorGPUCount(t *testing.T) {
 
 func TestBuildInferenceServiceHFTokenServiceAccount(t *testing.T) {
 	t.Setenv("HF_TOKEN_SECRET_NAME", "hf-token")
-	for uri, want := range map[string]string{
-		"hf://sentence-transformers/all-MiniLM-L6-v2": "iris-model-puller",
-		"gs://bucket/iris":                            "",
+	for _, tc := range []struct {
+		uri, serviceAccount, want string
+	}{
+		{uri: "hf://sentence-transformers/all-MiniLM-L6-v2", want: "iris-model-puller"},
+		{uri: "gs://bucket/iris"},
+		{uri: "hf://sentence-transformers/all-MiniLM-L6-v2", serviceAccount: "models-reader", want: "models-reader"},
 	} {
 		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
-			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: uri}),
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: tc.uri, ServiceAccountName: tc.serviceAccount}),
 		})
 		isvc, err := buildInferenceService(c)
 		if err != nil {
 			t.Fatal(err)
 		}
 		got, _, _ := unstructured.NestedString(isvc.Object, "spec", "predictor", "serviceAccountName")
-		if got != want {
-			t.Fatalf("%s: serviceAccountName = %q, want %q", uri, got, want)
+		if got != tc.want {
+			t.Fatalf("%s with %q: serviceAccountName = %q, want %q", tc.uri, tc.serviceAccount, got, tc.want)
 		}
 	}
 }

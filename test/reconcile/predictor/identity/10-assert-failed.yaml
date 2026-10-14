@@ -1,0 +1,6 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-identity-reserved
+status:
+  phase: Failed

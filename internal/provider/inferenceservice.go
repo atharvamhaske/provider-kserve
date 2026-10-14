@@ -3,6 +3,7 @@ package provider
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -48,17 +49,19 @@ type predictorSpec struct {
 	Affinity                  *corev1.Affinity                  `json:"affinity,omitempty"`
 	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+	SecurityContext           *corev1.PodSecurityContext        `json:"securityContext,omitempty"`
 	Model                     *modelSpec                        `json:"model,omitempty"`
 }
 
 type modelSpec struct {
-	ModelFormat    modelFormat                  `json:"modelFormat"`
-	Runtime        string                       `json:"runtime,omitempty"`
-	StorageURI     string                       `json:"storageUri,omitempty"`
-	RuntimeVersion string                       `json:"runtimeVersion,omitempty"`
-	Resources      *corev1.ResourceRequirements `json:"resources,omitempty"`
-	Env            []corev1.EnvVar              `json:"env,omitempty"`
-	Args           []string                     `json:"args,omitempty"`
+	ModelFormat     modelFormat                  `json:"modelFormat"`
+	Runtime         string                       `json:"runtime,omitempty"`
+	StorageURI      string                       `json:"storageUri,omitempty"`
+	RuntimeVersion  string                       `json:"runtimeVersion,omitempty"`
+	Resources       *corev1.ResourceRequirements `json:"resources,omitempty"`
+	Env             []corev1.EnvVar              `json:"env,omitempty"`
+	Args            []string                     `json:"args,omitempty"`
+	SecurityContext *corev1.SecurityContext      `json:"securityContext,omitempty"`
 }
 
 type modelFormat struct {
@@ -178,7 +181,45 @@ func validatePredictor(c *controller.Context) error {
 	default:
 		return fmt.Errorf("topology.parameters.externalAccess must be ClusterIP, LoadBalancer or NodePort")
 	}
+	return validatePredictorMetadata(c, params)
+}
+
+// validatePredictorMetadata rejects user labels and annotations that are
+// malformed or that would override keys the provider manages.
+func validatePredictorMetadata(c *controller.Context, params components.ModelServerCustomSpec) error {
+	reserved := providerLabelKeys(c)
+	for _, k := range slices.Sorted(maps.Keys(params.Labels)) {
+		if _, ok := reserved[k]; ok {
+			return fmt.Errorf("%s.parameters.labels: %q is managed by the provider", common.ComponentPredictor, k)
+		}
+		errs := append(validation.IsQualifiedName(k), validation.IsValidLabelValue(params.Labels[k])...)
+		if len(errs) > 0 {
+			return fmt.Errorf("%s.parameters.labels: invalid label %q: %s", common.ComponentPredictor, k, strings.Join(errs, "; "))
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(params.Annotations)) {
+		if k == common.DeploymentModeAnnotation {
+			return fmt.Errorf("%s.parameters.annotations: %q is managed by the provider", common.ComponentPredictor, k)
+		}
+		if errs := validation.IsQualifiedName(k); len(errs) > 0 {
+			return fmt.Errorf("%s.parameters.annotations: invalid key %q: %s", common.ComponentPredictor, k, strings.Join(errs, "; "))
+		}
+	}
 	return nil
+}
+
+// providerLabelKeys are the labels the provider puts on the InferenceService
+// and the predictor pods.
+func providerLabelKeys(c *controller.Context) map[string]struct{} {
+	keys := map[string]struct{}{
+		controller.ProviderLabel:  {},
+		controller.InstanceLabel:  {},
+		controller.ComponentLabel: {},
+	}
+	for k := range c.ObjectMeta(c.Name()).Labels {
+		keys[k] = struct{}{}
+	}
+	return keys
 }
 
 // validateStorageContainer mirrors the checks KServe's pod webhook runs on a
@@ -235,14 +276,17 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 
 	resources := predictorResources(comp.Resources, params.GpuCount)
 	predictor := predictorSpec{Model: &modelSpec{
-		ModelFormat:    modelFormat{Name: params.ModelFormat},
-		Runtime:        params.Runtime,
-		StorageURI:     params.StorageURI,
-		RuntimeVersion: params.RuntimeVersion,
-		Resources:      resources,
-		Env:            params.Env,
-		Args:           predictorArgs(params, resources),
+		ModelFormat:     modelFormat{Name: params.ModelFormat},
+		Runtime:         params.Runtime,
+		StorageURI:      params.StorageURI,
+		RuntimeVersion:  params.RuntimeVersion,
+		Resources:       resources,
+		Env:             params.Env,
+		Args:            predictorArgs(params, resources),
+		SecurityContext: params.ContainerSecurityContext,
 	}}
+	predictor.ServiceAccountName = params.ServiceAccountName
+	predictor.SecurityContext = params.SecurityContext
 	predictor.Labels = c.PodLabels(common.ComponentPredictor)
 	if policy := comp.SchedulingPolicy; policy != nil {
 		predictor.SchedulerName = policy.SchedulerName
@@ -262,15 +306,17 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		predictor.MaxReplicas = *params.MaxReplicas
 	}
 	predictor.StorageContainerName = params.StorageContainer
-	if usesHFTokenServiceAccount(params.StorageURI) {
+	if usesHFTokenServiceAccount(params) {
 		predictor.ServiceAccountName = modelPullerSAName(c.Name())
 	}
 
+	// KServe copies InferenceService labels and annotations to the predictor
+	// pods; provider-managed keys are applied last so they always win.
 	meta := c.ObjectMeta(c.Name())
-	if meta.Annotations == nil {
-		meta.Annotations = map[string]string{}
-	}
-	meta.Annotations[common.DeploymentModeAnnotation] = common.DeploymentModeStandard
+	meta.Labels = mergeMaps(params.Labels, meta.Labels)
+	meta.Annotations = mergeMaps(params.Annotations, map[string]string{
+		common.DeploymentModeAnnotation: common.DeploymentModeStandard,
+	})
 
 	spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&inferenceServiceSpec{Predictor: predictor})
 	if err != nil {
@@ -333,9 +379,10 @@ func requestsGPU(res *corev1.ResourceRequirements) bool {
 
 // usesHFTokenServiceAccount reports whether the predictor downloads from the
 // Hugging Face Hub with the chart's token configured; KServe's
-// storage-initializer reads the token from the pod's ServiceAccount.
-func usesHFTokenServiceAccount(storageURI string) bool {
-	return common.HFTokenSecretName() != "" && strings.HasPrefix(storageURI, "hf://")
+// storage-initializer reads the token from the pod's ServiceAccount. A
+// user-set serviceAccountName wins, so that account must carry the token.
+func usesHFTokenServiceAccount(params components.ModelServerCustomSpec) bool {
+	return params.ServiceAccountName == "" && common.HFTokenSecretName() != "" && strings.HasPrefix(params.StorageURI, "hf://")
 }
 
 // resolveCatalogModel fills modelFormat, storageURI and task from the catalog
@@ -391,6 +438,14 @@ func predictorResources(res *corev1.ResourceRequirements, gpuCount *int32) *core
 	return out
 }
 
+// mergeMaps returns a new map with base's entries overridden by override's.
+func mergeMaps(base, override map[string]string) map[string]string {
+	out := make(map[string]string, len(base)+len(override))
+	maps.Copy(out, base)
+	maps.Copy(out, override)
+	return out
+}
+
 // syncPredictor creates or updates the InferenceService and the optional
 // external Service in front of it.
 func (p *Provider) syncPredictor(c *controller.Context) error {
@@ -401,7 +456,7 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err != nil {
 		return err
 	}
-	if usesHFTokenServiceAccount(params.StorageURI) {
+	if usesHFTokenServiceAccount(params) {
 		if err := ensureModelPullerServiceAccount(c); err != nil {
 			return err
 		}

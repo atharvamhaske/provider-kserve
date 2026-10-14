@@ -1,0 +1,32 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-identity
+spec:
+  description: |
+    serviceAccountName, labels, annotations and both security contexts reach
+    the InferenceService, and KServe carries them onto the predictor pod
+    template. A label the provider manages is rejected by validation.
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice,deployment -o yaml
+  steps:
+    - name: identity
+      try:
+        - apply:
+            file: 00-serviceaccount.yaml
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-isvc.yaml
+        - assert:
+            file: 00-assert-deployment.yaml
+
+    - name: reserved-label
+      try:
+        - apply:
+            file: 10-instance-reserved-label.yaml
+        - assert:
+            file: 10-assert-failed.yaml
+        - error:
+            file: 10-errors.yaml

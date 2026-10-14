@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-predictor-identity-predictor
+spec:
+  template:
+    metadata:
+      labels:
+        cost-center: ml
+        core.openeverest.io/instance: test-predictor-identity
+      annotations:
+        example.com/owner: ml-platform
+    spec:
+      serviceAccountName: model-reader
+      securityContext:
+        runAsNonRoot: true
+      (containers[?name == 'kserve-container']):
+        - securityContext:
+            allowPrivilegeEscalation: false
