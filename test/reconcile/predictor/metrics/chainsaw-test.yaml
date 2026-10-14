@@ -21,7 +21,13 @@ spec:
             content: |
               kubectl get crd podmonitors.monitoring.coreos.com >/dev/null 2>&1 && exit 0
               kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.94.1/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml
-              kubectl wait --for=condition=Established crd/podmonitors.monitoring.coreos.com --timeout=60s
+              # kubectl wait fails instead of waiting while the new CRD has no status yet.
+              for _ in $(seq 1 30); do
+                kubectl get crd podmonitors.monitoring.coreos.com -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' | grep -q True && exit 0
+                sleep 2
+              done
+              echo "PodMonitor CRD not Established" >&2
+              exit 1
 
     - name: enabled-by-default
       try:
