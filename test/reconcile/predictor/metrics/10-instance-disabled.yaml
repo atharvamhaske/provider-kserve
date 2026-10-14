@@ -8,7 +8,7 @@ spec:
   topology:
     type: predictor
     parameters:
-      enableMetrics: "false"
+      enableMetrics: false
   components:
     predictor:
       type: modelServer
