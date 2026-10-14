@@ -251,6 +251,41 @@ loraAdapters:
     name: qwen2.5-0.5b-maestro
     uri: "hf://umsa-v1/maestro_Qwen2.5_0.5B_grupo1"
 
+# Models offered in the predictor topology model picker. The first entry is the
+# form's default. Each entry:
+#   label:       shown in the UI
+#   name:        stable key stored on the Instance (parameters.model)
+#   modelFormat: KServe model format (selects the serving runtime)
+#   storageURI:  model location (hf://, gs://, s3://, ...)
+#   task:        optional huggingface runtime task (--task)
+# All defaults run on CPU.
+# -- Models offered in the predictor topology model picker
+predictorModels:
+  - label: "all-MiniLM-L6-v2 (text embeddings, 384-d)"
+    name: all-minilm-l6-v2
+    modelFormat: huggingface
+    storageURI: "hf://sentence-transformers/all-MiniLM-L6-v2"
+    task: text_embedding
+  - label: "BGE small en v1.5 (text embeddings, 384-d)"
+    name: bge-small-en-v1.5
+    modelFormat: huggingface
+    storageURI: "hf://BAAI/bge-small-en-v1.5"
+    task: text_embedding
+  - label: "Multilingual E5 small (text embeddings, 384-d)"
+    name: multilingual-e5-small
+    modelFormat: huggingface
+    storageURI: "hf://intfloat/multilingual-e5-small"
+    task: text_embedding
+  - label: "DistilBERT SST-2 (sentiment classification)"
+    name: distilbert-sst2
+    modelFormat: huggingface
+    storageURI: "hf://distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+    task: sequence_classification
+  - label: "scikit-learn Iris (KServe example)"
+    name: sklearn-iris
+    modelFormat: sklearn
+    storageURI: "gs://kfserving-examples/models/sklearn/1.0/model"
+
 # ---------------------------------------------------------------------------
 # HuggingFace access for gated models.
 #

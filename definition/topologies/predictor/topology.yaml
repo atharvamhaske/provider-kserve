@@ -23,75 +23,99 @@ ui:
       label: Basic Information
       description: Configure the model to serve.
       components:
-        modelFormat:
+        model:
           uiType: select
-          path: spec.components.predictor.parameters.modelFormat
+          path: spec.components.predictor.parameters.model
           fieldParams:
-            label: Model Format
-            helperText: KServe picks the serving runtime that supports this format.
-            # Formats an installed ClusterServingRuntime auto-selects.
-            options:
-            - label: Hugging Face (Transformers, embeddings)
-              value: huggingface
-            - label: scikit-learn
-              value: sklearn
-            - label: XGBoost
-              value: xgboost
-            - label: LightGBM
-              value: lightgbm
-            - label: PyTorch (TorchServe)
-              value: pytorch
-            - label: TensorFlow
-              value: tensorflow
-            - label: ONNX
-              value: onnx
-            - label: Triton
-              value: triton
-            - label: TensorRT
-              value: tensorrt
-            - label: MLflow
-              value: mlflow
-            - label: PMML
-              value: pmml
-            - label: PaddlePaddle
-              value: paddle
-            - label: AutoGluon
-              value: autogluon
+            label: Model
+            helperText: Pick a model from the catalog, or turn on Custom model below.
+            # Options come from spec.uiSchema.predictor.modelCatalog, injected by
+            # the chart from `.Values.predictorModels` (see the llm modelURI note).
+            optionsPath: spec.uiSchema.predictor.modelCatalog
+            optionsPathConfig:
+              labelPath: label
+              valuePath: name
           validation:
             required: true
-        storageURI:
-          uiType: text
-          path: spec.components.predictor.parameters.storageURI
-          fieldParams:
-            label: Model Storage URI
-            placeholder: hf://sentence-transformers/all-MiniLM-L6-v2
-            helperText: hf://, s3://, gs://, pvc:// or https:// location of the model.
-          validation:
-            required: true
-        task:
-          uiType: select
-          path: spec.components.predictor.parameters.task
-          fieldParams:
-            label: Task
-            displayEmpty: true
-            helperText: Hugging Face only. Empty lets the runtime infer it from the model.
-            options:
-            - label: Text embedding
-              value: text_embedding
-            - label: Sequence classification
-              value: sequence_classification
-            - label: Token classification
-              value: token_classification
-            - label: Fill mask
-              value: fill_mask
-            - label: Text generation
-              value: text_generation
-            - label: Text-to-text generation
-              value: text2text_generation
-          validation:
-            celExpressions:
-            - celExpr: '!has(spec.components.predictor.parameters.task) || spec.components.predictor.parameters.modelFormat == "huggingface"'
-              message: Task requires Model Format = Hugging Face
+        customModel:
+          uiType: group
+          groupType: toggleable
+          label: Custom model
+          description: Serve your own model instead of the catalog entry.
+          components:
+            modelFormat:
+              uiType: select
+              path: spec.components.predictor.parameters.modelFormat
+              fieldParams:
+                label: Model Format
+                helperText: KServe picks the serving runtime that supports this format.
+                # Formats an installed ClusterServingRuntime auto-selects.
+                options:
+                - label: Hugging Face (Transformers, embeddings)
+                  value: huggingface
+                - label: scikit-learn
+                  value: sklearn
+                - label: XGBoost
+                  value: xgboost
+                - label: LightGBM
+                  value: lightgbm
+                - label: PyTorch (TorchServe)
+                  value: pytorch
+                - label: TensorFlow
+                  value: tensorflow
+                - label: ONNX
+                  value: onnx
+                - label: Triton
+                  value: triton
+                - label: TensorRT
+                  value: tensorrt
+                - label: MLflow
+                  value: mlflow
+                - label: PMML
+                  value: pmml
+                - label: PaddlePaddle
+                  value: paddle
+                - label: AutoGluon
+                  value: autogluon
+              validation:
+                required: true
+            storageURI:
+              uiType: text
+              path: spec.components.predictor.parameters.storageURI
+              fieldParams:
+                label: Model Storage URI
+                placeholder: hf://sentence-transformers/all-MiniLM-L6-v2
+                helperText: hf://, s3://, gs://, pvc:// or https:// location of the model.
+              validation:
+                required: true
+            task:
+              uiType: select
+              path: spec.components.predictor.parameters.task
+              fieldParams:
+                label: Task
+                displayEmpty: true
+                helperText: Hugging Face only. Empty lets the runtime infer it from the model.
+                options:
+                - label: Text embedding
+                  value: text_embedding
+                - label: Sequence classification
+                  value: sequence_classification
+                - label: Token classification
+                  value: token_classification
+                - label: Fill mask
+                  value: fill_mask
+                - label: Text generation
+                  value: text_generation
+                - label: Text-to-text generation
+                  value: text2text_generation
+              validation:
+                celExpressions:
+                - celExpr: '!has(spec.components.predictor.parameters.task) || spec.components.predictor.parameters.modelFormat == "huggingface"'
+                  message: Task requires Model Format = Hugging Face
+          componentsOrder:
+          - modelFormat
+          - storageURI
+          - task
         version:
           uiType: select
           path: spec.components.predictor.version
@@ -104,9 +128,8 @@ ui:
           validation:
             required: true
       componentsOrder:
-      - modelFormat
-      - storageURI
-      - task
+      - model
+      - customModel
       - version
     runtime:
       label: Serving Runtime

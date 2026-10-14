@@ -167,6 +167,11 @@ const (
 // component type, which is rendered into a KServe InferenceService predictor
 // (serving.kserve.io/v1beta1).
 type ModelServerCustomSpec struct {
+	// Model names an entry of the chart's predictorModels catalog (the UI model
+	// picker). It supplies modelFormat, storageURI and task unless modelFormat
+	// or storageURI is set, in which case the catalog entry is ignored.
+	Model string `json:"model,omitempty"`
+
 	// ModelFormat is the model framework, e.g. "sklearn", "pytorch",
 	// "tensorflow", "xgboost", "onnx", "triton", "huggingface". KServe uses it
 	// to auto-select a supporting ServingRuntime.

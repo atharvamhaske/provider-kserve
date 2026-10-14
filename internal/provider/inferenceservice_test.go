@@ -497,6 +497,94 @@ func TestValidatePredictorTask(t *testing.T) {
 	}
 }
 
+func predictorCatalogEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("PREDICTOR_MODEL_CATALOG", `[
+		{"label":"MiniLM","name":"minilm","modelFormat":"huggingface","storageURI":"hf://sentence-transformers/all-MiniLM-L6-v2","task":"text_embedding"},
+		{"label":"Iris","name":"iris","modelFormat":"sklearn","storageURI":"gs://bucket/iris"}
+	]`)
+	common.ResetPredictorCatalogForTest()
+	t.Cleanup(common.ResetPredictorCatalogForTest)
+}
+
+func TestResolveCatalogModel(t *testing.T) {
+	predictorCatalogEnv(t)
+	cases := []struct {
+		name    string
+		in      components.ModelServerCustomSpec
+		want    components.ModelServerCustomSpec
+		wantErr bool
+	}{
+		{
+			name: "catalog entry fills format, URI and task",
+			in:   components.ModelServerCustomSpec{Model: "minilm"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "huggingface", StorageURI: "hf://sentence-transformers/all-MiniLM-L6-v2", Task: "text_embedding"},
+		},
+		{
+			name: "explicit task wins",
+			in:   components.ModelServerCustomSpec{Model: "minilm", Task: "fill_mask"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "huggingface", StorageURI: "hf://sentence-transformers/all-MiniLM-L6-v2", Task: "fill_mask"},
+		},
+		{
+			name: "custom format and URI ignore the catalog",
+			in:   components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "sklearn", StorageURI: "gs://bucket/mine"},
+			want: components.ModelServerCustomSpec{Model: "minilm", ModelFormat: "sklearn", StorageURI: "gs://bucket/mine"},
+		},
+		{
+			name: "no model leaves params alone",
+			in:   components.ModelServerCustomSpec{ModelFormat: "onnx"},
+			want: components.ModelServerCustomSpec{ModelFormat: "onnx"},
+		},
+		{name: "unknown model", in: components.ModelServerCustomSpec{Model: "nope"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveCatalogModel(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %t", err, tc.wantErr)
+			}
+			if !tc.wantErr && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("params = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidatePredictorInstanceName(t *testing.T) {
+	for name, wantErr := range map[string]bool{"iris": false, "bge-small-en-v1.5": true, "1st-model": true} {
+		c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+			Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}),
+		})
+		c.Instance().Name = name
+		if err := validatePredictor(c); (err != nil) != wantErr {
+			t.Fatalf("%s: err = %v, wantErr %t", name, err, wantErr)
+		}
+	}
+}
+
+func TestBuildInferenceServiceFromCatalog(t *testing.T) {
+	predictorCatalogEnv(t)
+	c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+		Parameters: rawJSON(t, components.ModelServerCustomSpec{Model: "minilm"}),
+	})
+	if err := validatePredictor(c); err != nil {
+		t.Fatal(err)
+	}
+	isvc, err := buildInferenceService(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _, _ := unstructured.NestedMap(isvc.Object, "spec", "predictor", "model")
+	want := map[string]any{
+		"modelFormat": map[string]any{"name": "huggingface"},
+		"storageUri":  "hf://sentence-transformers/all-MiniLM-L6-v2",
+		"args":        []any{"--task=text_embedding", "--backend=huggingface"},
+	}
+	if !reflect.DeepEqual(model, want) {
+		t.Fatalf("model = %#v\nwant %#v", model, want)
+	}
+}
+
 func TestBuildInferenceServiceHFTokenServiceAccount(t *testing.T) {
 	t.Setenv("HF_TOKEN_SECRET_NAME", "hf-token")
 	for uri, want := range map[string]string{

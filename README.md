@@ -252,8 +252,9 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 
 | Field | Type | Description |
 |---|---|---|
-| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required.** |
-| `storageURI` | string | Model artifacts location. **Required.** |
+| `model` | string | Name of a `predictorModels` catalog entry (the UI model picker). Supplies `modelFormat`, `storageURI` and `task`; ignored when `modelFormat` or `storageURI` is set. |
+| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required** unless `model` is set. |
+| `storageURI` | string | Model artifacts location. **Required** unless `model` is set. |
 | `runtimeVersion` | string | Pin the serving runtime version. |
 | `runtime` | string | Explicitly select a (Cluster)ServingRuntime by name. |
 | `minReplicas` | int32 | Autoscaling floor (`0` enables scale-to-zero). |
@@ -283,7 +284,10 @@ the model is served under (the Instance name).
 an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
 [examples/instance-predictor-embeddings.yaml](examples/instance-predictor-embeddings.yaml).
 
-- Set `task: text_embedding` for sentence-embedding models.
+- Set `task: text_embedding` for sentence-embedding models, or pick an embedding model from
+  the catalog (`model: all-minilm-l6-v2`).
+- The chart's `predictorModels` value is the catalog behind the UI model picker; its first
+  entry is the form default. Entries name a `modelFormat`, `storageURI` and optional `task`.
 - Without a GPU in `resources`, the provider adds `--backend=huggingface`: the runtime's
   default picks vLLM, which does not start on CPU. An explicit `--backend` is kept.
 - With `huggingface.tokenSecretName` set, `hf://` predictors use the same token

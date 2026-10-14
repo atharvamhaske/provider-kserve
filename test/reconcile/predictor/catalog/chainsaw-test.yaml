@@ -1,0 +1,26 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-catalog
+spec:
+  description: |
+    parameters.model picks an entry from the chart's predictorModels catalog,
+    which fills in the model format and storage URI. A name that is not in the
+    catalog fails validation.
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice -o yaml
+  steps:
+    - name: catalog-model
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-isvc.yaml
+
+    - name: unknown-model
+      try:
+        - apply:
+            file: 10-instance-unknown.yaml
+        - assert:
+            file: 10-assert-failed.yaml

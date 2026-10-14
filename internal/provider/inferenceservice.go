@@ -129,9 +129,18 @@ func validatePredictor(c *controller.Context) error {
 	if !ok {
 		return fmt.Errorf("the %q component is required for the %q topology", common.ComponentPredictor, common.TopologyPredictor)
 	}
+	// KServe's webhook rejects other InferenceService names, which would leave
+	// the Instance without a status.
+	if errs := validation.IsDNS1035Label(c.Name()); len(errs) > 0 {
+		return fmt.Errorf("instance name %q is not valid for a predictor: %s", c.Name(), strings.Join(errs, "; "))
+	}
 
 	var params components.ModelServerCustomSpec
 	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return err
+	}
 	if params.ModelFormat == "" {
 		return fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
 	}
@@ -210,6 +219,10 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 
 	var params components.ModelServerCustomSpec
 	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return nil, err
+	}
 
 	if params.ModelFormat == "" {
 		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
@@ -311,12 +324,36 @@ func usesHFTokenServiceAccount(storageURI string) bool {
 	return common.HFTokenSecretName() != "" && strings.HasPrefix(storageURI, "hf://")
 }
 
+// resolveCatalogModel fills modelFormat, storageURI and task from the catalog
+// entry named by model. Setting modelFormat or storageURI opts out of the
+// catalog: mixing a catalog URI with another format would serve the wrong
+// runtime.
+func resolveCatalogModel(params components.ModelServerCustomSpec) (components.ModelServerCustomSpec, error) {
+	if params.Model == "" || params.ModelFormat != "" || params.StorageURI != "" {
+		return params, nil
+	}
+	entry, ok := common.LookupPredictorModel(params.Model)
+	if !ok {
+		return params, fmt.Errorf("%s.parameters.model: %q is not in the provider's model catalog", common.ComponentPredictor, params.Model)
+	}
+	params.ModelFormat = entry.ModelFormat
+	params.StorageURI = entry.StorageURI
+	if params.Task == "" {
+		params.Task = entry.Task
+	}
+	return params, nil
+}
+
 // syncPredictor creates or updates the InferenceService and the optional
 // external Service in front of it.
 func (p *Provider) syncPredictor(c *controller.Context) error {
 	comp := c.Instance().Spec.Components[common.ComponentPredictor]
 	var params components.ModelServerCustomSpec
 	c.TryDecodeComponentParameters(comp, &params)
+	params, err := resolveCatalogModel(params)
+	if err != nil {
+		return err
+	}
 	if usesHFTokenServiceAccount(params.StorageURI) {
 		if err := ensureModelPullerServiceAccount(c); err != nil {
 			return err
