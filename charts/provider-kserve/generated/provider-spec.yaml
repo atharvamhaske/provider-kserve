@@ -1199,7 +1199,7 @@ spec:
                   - celExpr: '!has(spec.components.predictor.parameters.minReplicas) || !has(spec.components.predictor.parameters.maxReplicas) || spec.components.predictor.parameters.minReplicas <= spec.components.predictor.parameters.maxReplicas'
                     message: Min Replicas cannot exceed Max Replicas
                 max: 32
-                min: 0
+                min: 1
           componentsOrder:
             - minReplicas
             - maxReplicas

@@ -45,7 +45,7 @@ spec:
         modelFormat: sklearn
         # Model artifacts location.
         storageURI: gs://kfserving-examples/models/sklearn/1.0/model
-        # Autoscaling bounds (minReplicas: 0 enables scale-to-zero).
+        # Autoscaling bounds (minReplicas >= 1; Standard mode does not scale to zero).
         minReplicas: 1
         maxReplicas: 3
         # runtimeVersion: "v2"

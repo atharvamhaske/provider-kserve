@@ -194,7 +194,8 @@ type ModelServerCustomSpec struct {
 	// replaced, not appended. The merged resource is validated by the API server.
 	Config string `json:"config,omitempty"`
 
-	// MinReplicas is the autoscaling floor (0 enables scale-to-zero).
+	// MinReplicas is the autoscaling floor, at least 1: KServe Standard mode
+	// does not scale to zero.
 	MinReplicas *int32 `json:"minReplicas,omitempty"`
 
 	// MaxReplicas is the autoscaling ceiling.
