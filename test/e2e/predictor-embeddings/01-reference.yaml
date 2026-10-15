@@ -1,5 +1,6 @@
 # all-MiniLM-L6-v2 embeddings computed with sentence-transformers (normalized),
-# and a checker that compares the served vectors with them. A model served with
+# and a checker that compares the vectors served under an OpenAI API base URL
+# (its first argument) with them. A model served with
 # the wrong pooling still returns 384-d vectors, but they drift from these
 # (cosine ~0.95 for a CLS-pooled model), so the test checks the cosine.
 apiVersion: v1
@@ -13,7 +14,7 @@ data:
     import json, math, sys, urllib.request
     ref = json.load(open("/ref/reference.json"))
     body = json.dumps({"model": sys.argv[2], "input": ref["texts"]}).encode()
-    req = urllib.request.Request(sys.argv[1] + "/openai/v1/embeddings", body, {"Content-Type": "application/json"})
+    req = urllib.request.Request(sys.argv[1] + "/embeddings", body, {"Content-Type": "application/json"})
     got = [d["embedding"] for d in json.load(urllib.request.urlopen(req, timeout=60))["data"]]
     def cos(a, b):
         return sum(x * y for x, y in zip(a, b)) / math.sqrt(sum(x * x for x in a) * sum(y * y for y in b))
