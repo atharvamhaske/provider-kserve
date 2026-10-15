@@ -453,7 +453,7 @@ kserveResources:
   # -- Deploy the KServe InferenceService controller
   enabled: true
   kserve:
-    # -- KServe image tag (the pinned charts are v0.21.0-rc1; see Chart.yaml)
+    # -- KServe image tag; keep in step with the chart versions in Chart.yaml
     version: v0.21.0
     # The ClusterStorageContainer is applied by the kserve-objects hook Job;
     # the ConfigMap and webhook Issuer stay in the release.

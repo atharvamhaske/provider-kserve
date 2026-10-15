@@ -29,9 +29,6 @@ maintainers:
 # The KServe charts are pulled from KServe's published OCI registry
 # (oci://ghcr.io/kserve/charts), all pinned to one version. Run `make helm-deps`
 # to vendor the dependencies into `charts/`.
-# KServe never published v0.21.0 charts (the v0.21.0 tag still carries the
-# v0.21.0-rc1 charts, identical apart from the version), so the rc1 charts are
-# pinned and values.yaml sets kserve.version to run the v0.21.0 images.
 dependencies:
   # cert-manager issues the admission-webhook certificates the KServe
   # controllers require. Off by default; normally installed beforehand.
@@ -44,7 +41,7 @@ dependencies:
   # Issuer, ClusterStorageContainer).
   - name: kserve-resources
     alias: kserveResources
-    version: "v0.21.0-rc1"
+    version: "v0.21.0"
     repository: "oci://ghcr.io/kserve/charts"
     condition: kserveResources.enabled
   # KServe LLMInferenceService controller + webhook — reconciles the llm
@@ -52,7 +49,7 @@ dependencies:
   # kserve-resources (see values.yaml).
   - name: kserve-llmisvc-resources
     alias: kserveLlmisvcResources
-    version: "v0.21.0-rc1"
+    version: "v0.21.0"
     repository: "oci://ghcr.io/kserve/charts"
     condition: kserveLlmisvcResources.enabled
   # Optional Envoy data-plane controller. Agent Router (formerly Envoy AI
