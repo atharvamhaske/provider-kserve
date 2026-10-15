@@ -1,0 +1,27 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-tei
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      parameters:
+        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+        args: [--model-id=sentence-transformers/all-MiniLM-L6-v2]
+        port: 80
+        healthPath: /health
+        openAICompatible: true
+        servedModelName: all-minilm

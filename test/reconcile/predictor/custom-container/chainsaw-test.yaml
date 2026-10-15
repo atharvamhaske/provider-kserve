@@ -1,0 +1,41 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-custom-container
+spec:
+  description: |
+    A custom image renders spec.predictor.containers instead of a model, inline
+    config adds a helper container and a volume next to it, the external
+    Service targets the helper container that receives the traffic, and
+    runtime fields cannot be combined with an image.
+  catch:
+    - script:
+        content: kubectl -n $NAMESPACE get instance,inferenceservice,service -o yaml
+  steps:
+    - name: render
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-isvc.yaml
+        - assert:
+            file: 00-assert-service.yaml
+
+    - name: reject-runtime-fields
+      try:
+        - apply:
+            file: 10-invalid.yaml
+        - assert:
+            resource:
+              apiVersion: core.openeverest.io/v1alpha1
+              kind: Instance
+              metadata:
+                name: test-predictor-custom-invalid
+              status:
+                phase: Failed
+        - error:
+            resource:
+              apiVersion: serving.kserve.io/v1beta1
+              kind: InferenceService
+              metadata:
+                name: test-predictor-custom-invalid

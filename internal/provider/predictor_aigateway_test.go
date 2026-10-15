@@ -32,6 +32,8 @@ func TestValidatePredictorAIGateway(t *testing.T) {
 		{name: "chart gateway disabled", params: embeddings, topo: gateway, wantErr: "aiGateway.enabled"},
 		{name: "not an embedding model", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}, topo: gateway, wantErr: "OpenAI-compatible"},
 		{name: "huggingface without the embedding task", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: "hf://org/model"}, topo: gateway, wantErr: "OpenAI-compatible"},
+		{name: "OpenAI-compatible image", enabled: true, params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", OpenAICompatible: true}, topo: gateway},
+		{name: "image without openAICompatible", enabled: true, params: components.ModelServerCustomSpec{Image: "ghcr.io/example/server:1"}, topo: gateway, wantErr: "OpenAI-compatible"},
 		{
 			name: "model name served by another route", enabled: true, params: embeddings, topo: gateway,
 			routes:  []client.Object{aiGatewayRouteObject("other", "iris-ai-gateway", "gw", "gw-ns", "iris")},

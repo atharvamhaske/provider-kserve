@@ -1,0 +1,45 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-custom-container
+spec:
+  description: |
+    Serve a sentence-embedding model with a custom image (Hugging Face Text
+    Embeddings Inference) instead of a KServe serving runtime: the Instance
+    becomes Ready once the health path reports the model loaded, its
+    connection Secret carries the in-cluster address and servedModelName, and
+    /v1/embeddings returns the same vectors as sentence-transformers.
+  catch:
+    - script:
+        content: |
+          kubectl -n $NAMESPACE get instance,inferenceservice,pod -o wide
+          kubectl -n $NAMESPACE logs -l serving.kserve.io/inferenceservice=test-predictor-tei --all-containers --tail=50
+  steps:
+    - name: ready
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-ready.yaml
+
+    - name: embed-through-connection-details
+      try:
+        - apply:
+            file: ../predictor-embeddings/01-reference.yaml
+        - script:
+            content: |
+              set -eu
+              secret=$(kubectl -n "$NAMESPACE" get instance test-predictor-tei -o jsonpath='{.status.connectionSecretRef.name}')
+              uri=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.uri}' | base64 -d)
+              model=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.model}' | base64 -d)
+              test "$model" = all-minilm
+              # Read the result from pod logs: `kubectl run -i` can echo stdout twice.
+              # --overrides replaces the container, so the endpoint goes in as arguments.
+              kubectl -n "$NAMESPACE" run embed --restart=Never --quiet --image=python:3.12-slim \
+                --overrides="{\"spec\":{\"volumes\":[{\"name\":\"ref\",\"configMap\":{\"name\":\"embedding-reference\"}}],\"containers\":[{\"name\":\"embed\",\"image\":\"python:3.12-slim\",\"command\":[\"python\",\"/ref/check.py\",\"$uri/v1\",\"$model\"],\"volumeMounts\":[{\"name\":\"ref\",\"mountPath\":\"/ref\"}]}]}}" >/dev/null
+              kubectl -n "$NAMESPACE" wait pod/embed --for=jsonpath='{.status.phase}'=Succeeded --timeout=3m >/dev/null
+              kubectl -n "$NAMESPACE" logs embed
+            check:
+              ($error): ~
+              (json_parse($stdout).dim): 384
+              (json_parse($stdout).minCosine > `0.999`): true

@@ -54,6 +54,9 @@ type predictorSpec struct {
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 	SecurityContext           *corev1.PodSecurityContext        `json:"securityContext,omitempty"`
 	DeploymentStrategy        *appsv1.DeploymentStrategy        `json:"deploymentStrategy,omitempty"`
+	ImagePullSecrets          []corev1.LocalObjectReference     `json:"imagePullSecrets,omitempty"`
+	Volumes                   []corev1.Volume                   `json:"volumes,omitempty"`
+	Containers                []corev1.Container                `json:"containers,omitempty"`
 	Model                     *modelSpec                        `json:"model,omitempty"`
 }
 
@@ -86,6 +89,18 @@ const (
 
 	huggingFaceModelFormat = "huggingface"
 	textEmbeddingTask      = "text_embedding"
+
+	// KServe treats the container with this name as the model server: it gets
+	// the storage-initializer mount and the Service routes to its first port.
+	kserveContainerName = "kserve-container"
+	// A container with this name in the predictor pod receives the traffic
+	// instead (KServe's predictor/transformer collocation).
+	transformerContainerName = "transformer-container"
+	storageURIEnvVar         = "STORAGE_URI"
+	sharedMemoryVolume       = "dshm"
+
+	metricsPortAnnotation = "prometheus.kserve.io/port"
+	metricsPathAnnotation = "prometheus.kserve.io/path"
 )
 
 // KServe's v1alpha1 Go package pulls in the cloud storage SDKs, so the
@@ -150,11 +165,14 @@ func validatePredictor(c *controller.Context) error {
 	if err != nil {
 		return err
 	}
-	if params.ModelFormat == "" {
-		return fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
-	}
-	if params.StorageURI == "" {
-		return fmt.Errorf("%s.parameters.storageURI is required", common.ComponentPredictor)
+	if params.UsesCustomContainer() {
+		if err := validateCustomContainer(params); err != nil {
+			return err
+		}
+	} else {
+		if err := validateRuntimeModel(params); err != nil {
+			return err
+		}
 	}
 	// KServe's HPA raises a floor below 1 to 1 in Standard mode, so 0 would
 	// silently keep one replica instead of scaling to zero.
@@ -166,9 +184,6 @@ func validatePredictor(c *controller.Context) error {
 	}
 	if params.GpuCount != nil && *params.GpuCount < 0 {
 		return fmt.Errorf("%s.parameters.gpuCount must not be negative", common.ComponentPredictor)
-	}
-	if params.Task != "" && !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
-		return fmt.Errorf("%s.parameters.task is only supported with modelFormat %q", common.ComponentPredictor, huggingFaceModelFormat)
 	}
 	if params.StorageContainer != "" {
 		if err := validateStorageContainer(c, params.StorageContainer, params.StorageURI); err != nil {
@@ -194,8 +209,9 @@ func validatePredictor(c *controller.Context) error {
 		if !common.AIGatewayEnabled() {
 			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway requires aiGateway.enabled in the provider chart")
 		}
-		if !servesOpenAIEmbeddings(params) {
-			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway needs an OpenAI-compatible predictor: modelFormat %q with task %q", huggingFaceModelFormat, textEmbeddingTask)
+		if predictorOpenAIPrefix(params) == "" {
+			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway needs an OpenAI-compatible predictor: "+
+				"modelFormat %q with task %q, or an image with openAICompatible", huggingFaceModelFormat, textEmbeddingTask)
 		}
 		if err := validateAIGatewayAccess(c, c.Name(), "the predictor serves the model under the Instance name, so use another Instance name"); err != nil {
 			return err
@@ -238,6 +254,63 @@ func validatePredictorMetadata(c *controller.Context, params components.ModelSer
 		if errs := validation.IsQualifiedName(k); len(errs) > 0 {
 			return fmt.Errorf("%s.parameters.annotations: invalid key %q: %s", common.ComponentPredictor, k, strings.Join(errs, "; "))
 		}
+	}
+	return nil
+}
+
+// validateRuntimeModel checks a predictor served by a KServe serving runtime.
+func validateRuntimeModel(params components.ModelServerCustomSpec) error {
+	if params.ModelFormat == "" {
+		return fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
+	}
+	if params.StorageURI == "" {
+		return fmt.Errorf("%s.parameters.storageURI is required", common.ComponentPredictor)
+	}
+	if params.Task != "" && !strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) {
+		return fmt.Errorf("%s.parameters.task is only supported with modelFormat %q", common.ComponentPredictor, huggingFaceModelFormat)
+	}
+	imageOnly := map[string]bool{
+		"command":          len(params.Command) > 0,
+		"port":             params.Port != nil,
+		"healthPath":       params.HealthPath != "",
+		"openAICompatible": params.OpenAICompatible,
+		"servedModelName":  params.ServedModelName != "",
+		"imagePullSecret":  params.ImagePullSecret != "",
+	}
+	for _, field := range slices.Sorted(maps.Keys(imageOnly)) {
+		if imageOnly[field] {
+			return fmt.Errorf("%s.parameters.%s requires image", common.ComponentPredictor, field)
+		}
+	}
+	return nil
+}
+
+// validateCustomContainer checks a predictor that runs a user image.
+func validateCustomContainer(params components.ModelServerCustomSpec) error {
+	runtimeOnly := map[string]string{
+		"modelFormat":    params.ModelFormat,
+		"runtime":        params.Runtime,
+		"runtimeVersion": params.RuntimeVersion,
+		"task":           params.Task,
+	}
+	for _, field := range slices.Sorted(maps.Keys(runtimeOnly)) {
+		if runtimeOnly[field] != "" {
+			return fmt.Errorf("%s.parameters.%s selects a KServe serving runtime and cannot be combined with image", common.ComponentPredictor, field)
+		}
+	}
+	if port := params.ContainerPort(); port < 1 || port > 65535 {
+		return fmt.Errorf("%s.parameters.port must be between 1 and 65535", common.ComponentPredictor)
+	}
+	if params.HealthPath != "" && !strings.HasPrefix(params.HealthPath, "/") {
+		return fmt.Errorf("%s.parameters.healthPath must start with /", common.ComponentPredictor)
+	}
+	if params.ImagePullSecret != "" {
+		if errs := validation.IsDNS1123Subdomain(params.ImagePullSecret); len(errs) > 0 {
+			return fmt.Errorf("%s.parameters.imagePullSecret: %s", common.ComponentPredictor, strings.Join(errs, "; "))
+		}
+	}
+	if params.StorageContainer != "" && params.StorageURI == "" {
+		return fmt.Errorf("%s.parameters.storageContainer requires storageURI", common.ComponentPredictor)
 	}
 	return nil
 }
@@ -304,21 +377,32 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		return nil, err
 	}
 
-	if params.ModelFormat == "" {
-		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
-	}
-
 	resources := predictorResources(comp.Resources, params.GpuCount)
-	predictor := predictorSpec{Model: &modelSpec{
-		ModelFormat:     modelFormat{Name: params.ModelFormat},
-		Runtime:         params.Runtime,
-		StorageURI:      params.StorageURI,
-		RuntimeVersion:  params.RuntimeVersion,
-		Resources:       resources,
-		Env:             params.Env,
-		Args:            predictorArgs(params, resources),
-		SecurityContext: params.ContainerSecurityContext,
-	}}
+	var predictor predictorSpec
+	switch {
+	case params.UsesCustomContainer():
+		predictor.Containers = []corev1.Container{customPredictorContainer(params, resources)}
+		predictor.Volumes = []corev1.Volume{{
+			Name:         sharedMemoryVolume,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+		}}
+		if params.ImagePullSecret != "" {
+			predictor.ImagePullSecrets = []corev1.LocalObjectReference{{Name: params.ImagePullSecret}}
+		}
+	case params.ModelFormat == "":
+		return nil, fmt.Errorf("%s.parameters.modelFormat is required", common.ComponentPredictor)
+	default:
+		predictor.Model = &modelSpec{
+			ModelFormat:     modelFormat{Name: params.ModelFormat},
+			Runtime:         params.Runtime,
+			StorageURI:      params.StorageURI,
+			RuntimeVersion:  params.RuntimeVersion,
+			Resources:       resources,
+			Env:             params.Env,
+			Args:            predictorArgs(params, resources),
+			SecurityContext: params.ContainerSecurityContext,
+		}
+	}
 	predictor.ServiceAccountName = params.ServiceAccountName
 	predictor.SecurityContext = params.SecurityContext
 	predictor.Labels = c.PodLabels(common.ComponentPredictor)
@@ -350,7 +434,16 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	// pods; provider-managed keys are applied last so they always win.
 	meta := c.ObjectMeta(c.Name())
 	meta.Labels = mergeMaps(params.Labels, meta.Labels)
-	meta.Annotations = mergeMaps(params.Annotations, map[string]string{
+	annotations := params.Annotations
+	if params.UsesCustomContainer() {
+		// The PodMonitor reads the metrics endpoint from these; a serving
+		// runtime would set them, a custom image has none.
+		annotations = mergeMaps(map[string]string{
+			metricsPortAnnotation: strconv.Itoa(int(params.ContainerPort())),
+			metricsPathAnnotation: "/metrics",
+		}, annotations)
+	}
+	meta.Annotations = mergeMaps(annotations, map[string]string{
 		common.DeploymentModeAnnotation: common.DeploymentModeStandard,
 	})
 
@@ -371,6 +464,38 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	isvc.SetAnnotations(meta.Annotations)
 	isvc.Object["spec"] = spec
 	return isvc, nil
+}
+
+// customPredictorContainer is the model server container for a user image.
+func customPredictorContainer(params components.ModelServerCustomSpec, resources *corev1.ResourceRequirements) corev1.Container {
+	port := params.ContainerPort()
+	container := corev1.Container{
+		Name:            kserveContainerName,
+		Image:           params.Image,
+		Command:         params.Command,
+		Args:            params.Args,
+		Env:             params.Env,
+		Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: port, Protocol: corev1.ProtocolTCP}},
+		SecurityContext: params.ContainerSecurityContext,
+		// PyTorch, vLLM and Triton need more than the 64Mi /dev/shm default.
+		VolumeMounts: []corev1.VolumeMount{{Name: sharedMemoryVolume, MountPath: "/dev/shm"}},
+	}
+	if params.StorageURI != "" {
+		container.Env = append(slices.Clone(params.Env), corev1.EnvVar{Name: storageURIEnvVar, Value: params.StorageURI})
+	}
+	if resources != nil {
+		container.Resources = *resources
+	}
+	if params.HealthPath != "" {
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+				Path: params.HealthPath,
+				Port: intstr.FromInt32(port),
+			}},
+			PeriodSeconds: 10,
+		}
+	}
+	return container
 }
 
 // predictorArgs adds the huggingface runtime flags the provider manages to the
@@ -464,9 +589,9 @@ func usesHFTokenServiceAccount(params components.ModelServerCustomSpec) bool {
 // resolveCatalogModel fills modelFormat, storageURI and task from the catalog
 // entry named by model. Setting modelFormat or storageURI opts out of the
 // catalog: mixing a catalog URI with another format would serve the wrong
-// runtime.
+// runtime. A custom container image ignores the catalog.
 func resolveCatalogModel(params components.ModelServerCustomSpec) (components.ModelServerCustomSpec, error) {
-	if params.Model == "" || params.ModelFormat != "" || params.StorageURI != "" {
+	if params.Model == "" || params.ModelFormat != "" || params.StorageURI != "" || params.UsesCustomContainer() {
 		return params, nil
 	}
 	entry, ok := common.LookupPredictorModel(params.Model)
@@ -550,10 +675,39 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := syncPodMonitor(c, topo.MetricsEnabled(), buildPredictorPodMonitor(c.Name(), c.Instance().Namespace, c.PodLabels(common.ComponentPredictor), common.PodMonitorInterval())); err != nil {
 		return err
 	}
-	if err := syncPredictorAIGateway(c, topo); err != nil {
+	if err := syncPredictorAIGateway(c, topo, params); err != nil {
 		return err
 	}
-	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
+	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorTargetPort(isvc))
+}
+
+// predictorTargetPort mirrors how KServe picks the predictor Service's target:
+// the first port of the transformer-container if the pod has one, else of the
+// first container, else the runtimes' 8080.
+func predictorTargetPort(isvc *unstructured.Unstructured) int32 {
+	containers, _, _ := unstructured.NestedSlice(isvc.Object, "spec", "predictor", "containers")
+	if len(containers) == 0 {
+		return predictorContainerPort
+	}
+	container, _ := containers[0].(map[string]any)
+	for _, raw := range containers {
+		if c, _ := raw.(map[string]any); c != nil && c["name"] == transformerContainerName {
+			container = c
+			break
+		}
+	}
+	ports, _, _ := unstructured.NestedSlice(container, "ports")
+	if len(ports) == 0 {
+		return predictorContainerPort
+	}
+	port, _ := ports[0].(map[string]any)
+	switch p := port["containerPort"].(type) {
+	case int64:
+		return int32(p)
+	case float64:
+		return int32(p)
+	}
+	return predictorContainerPort
 }
 
 func predictorServiceType(c *controller.Context) corev1.ServiceType {
@@ -562,18 +716,32 @@ func predictorServiceType(c *controller.Context) corev1.ServiceType {
 	return resolveServiceType(topo.ResolvedServiceType(), c.Instance().Spec.Components[common.ComponentPredictor].Service)
 }
 
-// kserveOpenAIPrefix is where KServe's Hugging Face runtime serves the OpenAI API.
-const kserveOpenAIPrefix = "/openai/v1"
+// kserveOpenAIPrefix is where KServe's Hugging Face runtime serves the OpenAI
+// API; OpenAI-compatible servers (vLLM, TEI, llama.cpp, NIM) use /v1.
+const (
+	kserveOpenAIPrefix = "/openai/v1"
+	openAIPrefix       = "/v1"
+)
 
-// servesOpenAIEmbeddings reports whether the predictor serves the OpenAI
-// embeddings API, the only OpenAI endpoint the AI Gateway route exposes today.
-func servesOpenAIEmbeddings(params components.ModelServerCustomSpec) bool {
-	return strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) && params.Task == textEmbeddingTask
+// predictorOpenAIPrefix returns where the predictor serves the OpenAI API, or
+// "" when it does not. Of the runtimes, only Hugging Face embeddings qualify:
+// the AI Gateway route exposes no other runtime endpoint.
+func predictorOpenAIPrefix(params components.ModelServerCustomSpec) string {
+	switch {
+	case params.UsesCustomContainer():
+		if params.OpenAICompatible {
+			return openAIPrefix
+		}
+		return ""
+	case strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) && params.Task == textEmbeddingTask:
+		return kserveOpenAIPrefix
+	}
+	return ""
 }
 
 // syncPredictorAIGateway registers the predictor on the shared AI Gateway, or
 // removes its gateway objects when another access path is selected.
-func syncPredictorAIGateway(c *controller.Context, topo predictor.PredictorTopologyParameters) error {
+func syncPredictorAIGateway(c *controller.Context, topo predictor.PredictorTopologyParameters, params components.ModelServerCustomSpec) error {
 	if !topo.UsesAIGateway() {
 		if !common.AIGatewayEnabled() {
 			return nil
@@ -587,8 +755,18 @@ func syncPredictorAIGateway(c *controller.Context, topo predictor.PredictorTopol
 		return deleteAIGatewayObject(c, envoyBackendGVK, aiGatewayRouteSuffix)
 	}
 	host := fmt.Sprintf("%s-predictor.%s.svc.cluster.local", c.Name(), c.Namespace())
-	backend, aiBackend := buildServiceBackends(c.Name(), c.Namespace(), host, predictorServicePort, kserveOpenAIPrefix)
-	return syncAIGateway(c, c.Name(), topo.TokenLimitPerHour, map[string]any{"name": aiBackend.GetName()}, backend, aiBackend)
+	backend, aiBackend := buildServiceBackends(c.Name(), c.Namespace(), host, predictorServicePort, predictorOpenAIPrefix(params))
+	return syncAIGateway(c, c.Name(), topo.TokenLimitPerHour, predictorAIBackendRef(aiBackend.GetName(), c.Name(), params), backend, aiBackend)
+}
+
+// predictorAIBackendRef routes to the AIServiceBackend. Clients send the
+// Instance name as the model; servers that check it get servedModelName.
+func predictorAIBackendRef(backendName, instanceName string, params components.ModelServerCustomSpec) map[string]any {
+	ref := map[string]any{"name": backendName}
+	if params.ServedModelName != "" && params.ServedModelName != instanceName {
+		ref["modelNameOverride"] = params.ServedModelName
+	}
+	return ref
 }
 
 // statusPredictor translates the InferenceService status into a provider Status.
@@ -620,8 +798,9 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 			return controller.ReadyWithConnectionDetails(details), nil
 		}
 		if details := predictorConnectionDetails(c, status); details != nil {
-			// KServe runtimes serve the model under the InferenceService name.
-			details.AdditionalProperties = map[string]string{"model": c.Name()}
+			if model := predictorServedModelName(c); model != "" {
+				details.AdditionalProperties = map[string]string{"model": model}
+			}
 			return controller.ReadyWithConnectionDetails(*details), nil
 		}
 		return controller.Ready(), nil
@@ -633,6 +812,18 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 	// model), so surface it as Provisioning and let the condition message
 	// explain the current state rather than flipping the Instance to Failed.
 	return controller.Provisioning(conditionMessage(ready, "InferenceService is being created")), nil
+}
+
+// predictorServedModelName is the model name clients send directly to the
+// predictor: KServe runtimes use the InferenceService name, a custom image
+// whatever servedModelName declares (unknown when unset).
+func predictorServedModelName(c *controller.Context) string {
+	var params components.ModelServerCustomSpec
+	c.TryDecodeComponentParameters(c.Instance().Spec.Components[common.ComponentPredictor], &params)
+	if params.UsesCustomContainer() {
+		return params.ServedModelName
+	}
+	return c.Name()
 }
 
 // predictorConnectionDetails picks the address clients should use: the

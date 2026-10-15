@@ -34,7 +34,7 @@ spec:
               # Read the result from pod logs: `kubectl run -i` can echo stdout twice.
               # --overrides replaces the container, so the endpoint goes in as arguments.
               kubectl -n "$NAMESPACE" run embed --restart=Never --quiet --image=python:3.12-slim \
-                --overrides="{\"spec\":{\"volumes\":[{\"name\":\"ref\",\"configMap\":{\"name\":\"embedding-reference\"}}],\"containers\":[{\"name\":\"embed\",\"image\":\"python:3.12-slim\",\"command\":[\"python\",\"/ref/check.py\",\"$uri\",\"$model\"],\"volumeMounts\":[{\"name\":\"ref\",\"mountPath\":\"/ref\"}]}]}}" >/dev/null
+                --overrides="{\"spec\":{\"volumes\":[{\"name\":\"ref\",\"configMap\":{\"name\":\"embedding-reference\"}}],\"containers\":[{\"name\":\"embed\",\"image\":\"python:3.12-slim\",\"command\":[\"python\",\"/ref/check.py\",\"$uri/openai/v1\",\"$model\"],\"volumeMounts\":[{\"name\":\"ref\",\"mountPath\":\"/ref\"}]}]}}" >/dev/null
               kubectl -n "$NAMESPACE" wait pod/embed --for=jsonpath='{.status.phase}'=Succeeded --timeout=3m >/dev/null
               kubectl -n "$NAMESPACE" logs embed
             check:

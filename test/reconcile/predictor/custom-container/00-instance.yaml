@@ -1,0 +1,41 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-custom
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+    parameters:
+      externalAccess: NodePort
+      enableMetrics: false
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+      parameters:
+        image: hashicorp/http-echo:1.0
+        args: [-listen=:5678, -text=model]
+        port: 5678
+        healthPath: /
+        servedModelName: echo
+        config: |
+          predictor:
+            containers:
+              - name: transformer-container
+                image: hashicorp/http-echo:1.0
+                args: [-listen=:3000, -text=shim]
+                ports:
+                  - containerPort: 3000
+              - name: kserve-container
+                volumeMounts:
+                  - name: scratch
+                    mountPath: /scratch
+            volumes:
+              - name: scratch
+                emptyDir: {}

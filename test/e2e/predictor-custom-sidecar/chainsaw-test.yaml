@@ -1,0 +1,40 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: predictor-custom-sidecar
+spec:
+  description: |
+    Serve a model server plus a helper container in one predictor pod (the
+    shape of a vLLM + API shim deployment): llama.cpp serves a small chat model
+    and a Python shim named transformer-container receives the Service traffic
+    and calls the model on localhost. A request made through the connection
+    details reaches the shim, which answers with the model's output.
+  catch:
+    - script:
+        content: |
+          kubectl -n $NAMESPACE get instance,inferenceservice,pod,service -o wide
+          kubectl -n $NAMESPACE logs -l serving.kserve.io/inferenceservice=test-predictor-sidecar --all-containers --tail=50
+  steps:
+    - name: ready
+      try:
+        - apply:
+            file: 00-instance.yaml
+        - assert:
+            file: 00-assert-ready.yaml
+
+    - name: ask-the-shim-through-connection-details
+      try:
+        - script:
+            content: |
+              set -eu
+              secret=$(kubectl -n "$NAMESPACE" get instance test-predictor-sidecar -o jsonpath='{.status.connectionSecretRef.name}')
+              uri=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.uri}' | base64 -d)
+              kubectl -n "$NAMESPACE" run ask --restart=Never --quiet --image=curlimages/curl:8.11.1 -- \
+                curl -sf -m 120 -X POST "$uri/decide" -H 'Content-Type: application/json' \
+                -d '{"question":"Is the sky blue? Answer yes or no."}' >/dev/null
+              kubectl -n "$NAMESPACE" wait pod/ask --for=jsonpath='{.status.phase}'=Succeeded --timeout=3m >/dev/null
+              kubectl -n "$NAMESPACE" logs ask
+            check:
+              ($error): ~
+              (json_parse($stdout).shim): true
+              (length(json_parse($stdout).decision) > `0`): true
