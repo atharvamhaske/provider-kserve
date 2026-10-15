@@ -141,7 +141,7 @@ func TestEnsureAIGatewayKey(t *testing.T) {
 }
 
 func aiGatewayRouteObject(namespace, name, gatewayName, gatewayNamespace string, models ...string) *unstructured.Unstructured {
-	route := buildAIGatewayRoute(strings.TrimSuffix(name, aiGatewayRouteSuffix), namespace, "", gatewayName, gatewayNamespace)
+	route := buildAIGatewayRoute(strings.TrimSuffix(name, aiGatewayRouteSuffix), namespace, "", gatewayName, gatewayNamespace, inferencePoolBackendRef(strings.TrimSuffix(name, aiGatewayRouteSuffix)))
 	var matches []any
 	for _, model := range models {
 		matches = append(matches, map[string]any{
@@ -174,14 +174,14 @@ func TestValidateAIGatewayAccess(t *testing.T) {
 
 	t.Run("rejects plain HTTP", func(t *testing.T) {
 		gatewayEnv(t, "http", "false")
-		if err := validateAIGatewayAccess(newContext(t), "llama"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		if err := validateAIGatewayAccess(newContext(t), "llama", "pick another name"); err == nil || !strings.Contains(err.Error(), "HTTPS") {
 			t.Fatalf("err = %v, want HTTPS requirement", err)
 		}
 	})
 
 	t.Run("allows plain HTTP when explicitly allowed", func(t *testing.T) {
 		gatewayEnv(t, "http", "true")
-		if err := validateAIGatewayAccess(newContext(t), "llama"); err != nil {
+		if err := validateAIGatewayAccess(newContext(t), "llama", "pick another name"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -189,7 +189,7 @@ func TestValidateAIGatewayAccess(t *testing.T) {
 	t.Run("rejects a model name served by another route", func(t *testing.T) {
 		gatewayEnv(t, "https", "false")
 		other := aiGatewayRouteObject("other", "chat-ai-gateway", "gw", "gw-ns", "llama")
-		if err := validateAIGatewayAccess(newContext(t, other), "llama"); err == nil || !strings.Contains(err.Error(), "other/chat-ai-gateway") {
+		if err := validateAIGatewayAccess(newContext(t, other), "llama", "pick another name"); err == nil || !strings.Contains(err.Error(), "other/chat-ai-gateway") {
 			t.Fatalf("err = %v, want conflict with other/chat-ai-gateway", err)
 		}
 	})
@@ -198,7 +198,7 @@ func TestValidateAIGatewayAccess(t *testing.T) {
 		gatewayEnv(t, "https", "false")
 		own := aiGatewayRouteObject("ns", "llama-ai-gateway", "gw", "gw-ns", "llama")
 		elsewhere := aiGatewayRouteObject("other", "chat-ai-gateway", "another-gw", "gw-ns", "llama")
-		if err := validateAIGatewayAccess(newContext(t, own, elsewhere), "llama"); err != nil {
+		if err := validateAIGatewayAccess(newContext(t, own, elsewhere), "llama", "pick another name"); err != nil {
 			t.Fatal(err)
 		}
 	})

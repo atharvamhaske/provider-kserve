@@ -186,9 +186,28 @@ func validatePredictor(c *controller.Context) error {
 	var topo predictor.PredictorTopologyParameters
 	c.TryDecodeTopologyParameters(&topo)
 	switch topo.ExternalAccess {
-	case "", predictor.ExternalAccessClusterIP, predictor.ExternalAccessLoadBalancer, predictor.ExternalAccessNodePort:
+	case "", predictor.ExternalAccessClusterIP, predictor.ExternalAccessLoadBalancer, predictor.ExternalAccessNodePort, predictor.ExternalAccessEnvoyAIGateway:
 	default:
-		return fmt.Errorf("topology.parameters.externalAccess must be ClusterIP, LoadBalancer or NodePort")
+		return fmt.Errorf("topology.parameters.externalAccess must be ClusterIP, LoadBalancer, NodePort or EnvoyAIGateway")
+	}
+	if topo.UsesAIGateway() {
+		if !common.AIGatewayEnabled() {
+			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway requires aiGateway.enabled in the provider chart")
+		}
+		if !servesOpenAIEmbeddings(params) {
+			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway needs an OpenAI-compatible predictor: modelFormat %q with task %q", huggingFaceModelFormat, textEmbeddingTask)
+		}
+		if err := validateAIGatewayAccess(c, c.Name(), "the predictor serves the model under the Instance name, so use another Instance name"); err != nil {
+			return err
+		}
+	}
+	if topo.TokenLimitPerHour != nil {
+		if !topo.UsesAIGateway() {
+			return fmt.Errorf("topology.parameters.tokenLimitPerHour requires externalAccess EnvoyAIGateway")
+		}
+		if *topo.TokenLimitPerHour < 1 {
+			return fmt.Errorf("topology.parameters.tokenLimitPerHour must be greater than zero")
+		}
 	}
 	if err := validatePredictorMetadata(c, params); err != nil {
 		return err
@@ -531,6 +550,9 @@ func (p *Provider) syncPredictor(c *controller.Context) error {
 	if err := syncPodMonitor(c, topo.MetricsEnabled(), buildPredictorPodMonitor(c.Name(), c.Instance().Namespace, c.PodLabels(common.ComponentPredictor), common.PodMonitorInterval())); err != nil {
 		return err
 	}
+	if err := syncPredictorAIGateway(c, topo); err != nil {
+		return err
+	}
 	return reconcileExternalService(c, comp.Service, predictorServiceType(c), c.PodLabels(common.ComponentPredictor), predictorServicePort, predictorContainerPort)
 }
 
@@ -538,6 +560,35 @@ func predictorServiceType(c *controller.Context) corev1.ServiceType {
 	var topo predictor.PredictorTopologyParameters
 	c.TryDecodeTopologyParameters(&topo)
 	return resolveServiceType(topo.ResolvedServiceType(), c.Instance().Spec.Components[common.ComponentPredictor].Service)
+}
+
+// kserveOpenAIPrefix is where KServe's Hugging Face runtime serves the OpenAI API.
+const kserveOpenAIPrefix = "/openai/v1"
+
+// servesOpenAIEmbeddings reports whether the predictor serves the OpenAI
+// embeddings API, the only OpenAI endpoint the AI Gateway route exposes today.
+func servesOpenAIEmbeddings(params components.ModelServerCustomSpec) bool {
+	return strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) && params.Task == textEmbeddingTask
+}
+
+// syncPredictorAIGateway registers the predictor on the shared AI Gateway, or
+// removes its gateway objects when another access path is selected.
+func syncPredictorAIGateway(c *controller.Context, topo predictor.PredictorTopologyParameters) error {
+	if !topo.UsesAIGateway() {
+		if !common.AIGatewayEnabled() {
+			return nil
+		}
+		if err := cleanupAIGateway(c); err != nil {
+			return err
+		}
+		if err := deleteAIGatewayObject(c, aiServiceBackendGVK, aiGatewayRouteSuffix); err != nil {
+			return err
+		}
+		return deleteAIGatewayObject(c, envoyBackendGVK, aiGatewayRouteSuffix)
+	}
+	host := fmt.Sprintf("%s-predictor.%s.svc.cluster.local", c.Name(), c.Namespace())
+	backend, aiBackend := buildServiceBackends(c.Name(), c.Namespace(), host, predictorServicePort, kserveOpenAIPrefix)
+	return syncAIGateway(c, c.Name(), topo.TokenLimitPerHour, map[string]any{"name": aiBackend.GetName()}, backend, aiBackend)
 }
 
 // statusPredictor translates the InferenceService status into a provider Status.
@@ -556,6 +607,18 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 
 	ready := status.GetCondition(apis.ConditionReady)
 	if ready != nil && ready.IsTrue() {
+		var topo predictor.PredictorTopologyParameters
+		c.TryDecodeTopologyParameters(&topo)
+		if topo.UsesAIGateway() {
+			details, waiting, err := aiGatewayConnectionDetails(c, c.Name())
+			if err != nil {
+				return controller.Status{}, err
+			}
+			if waiting != "" {
+				return controller.Provisioning(waiting), nil
+			}
+			return controller.ReadyWithConnectionDetails(details), nil
+		}
 		if details := predictorConnectionDetails(c, status); details != nil {
 			// KServe runtimes serve the model under the InferenceService name.
 			details.AdditionalProperties = map[string]string{"model": c.Name()}

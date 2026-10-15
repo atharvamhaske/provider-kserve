@@ -444,6 +444,9 @@ spec:
               type: boolean
             externalAccess:
               type: string
+            tokenLimitPerHour:
+              format: int32
+              type: integer
           type: object
   uiSchema:
     llm:
@@ -1140,6 +1143,7 @@ spec:
             externalAccess:
               fieldParams:
                 defaultValue: ClusterIP
+                helperText: Envoy AI Gateway serves text embedding models only.
                 label: External access
                 options:
                   - label: ClusterIP
@@ -1148,11 +1152,25 @@ spec:
                     value: LoadBalancer
                   - label: NodePort
                     value: NodePort
+                  - label: Envoy AI Gateway
+                    value: EnvoyAIGateway
               path: spec.topology.parameters.externalAccess
               uiType: select
+            tokenLimitPerHour:
+              fieldParams:
+                helperText: Only with Envoy AI Gateway. Leave empty for the default (1000) when a Redis/Valkey rate-limit backend is configured.
+                label: Tokens per User per Hour
+              path: spec.topology.parameters.tokenLimitPerHour
+              uiType: number
+              validation:
+                celExpressions:
+                  - celExpr: '!has(spec.topology.parameters.tokenLimitPerHour) || spec.topology.parameters.externalAccess == "EnvoyAIGateway"'
+                    message: Tokens per User per Hour requires External access = Envoy AI Gateway
+                min: 1
           componentsOrder:
             - externalAccess
-          description: How clients reach the model. ClusterIP stays in-cluster; LoadBalancer and NodePort create a Service in front of the predictor pods.
+            - tokenLimitPerHour
+          description: How clients reach the model. ClusterIP stays in-cluster; LoadBalancer and NodePort create a Service in front of the predictor pods; Envoy AI Gateway publishes an embedding model on the shared Gateway, with an API key.
           label: Routing
         runtime:
           components:

@@ -44,6 +44,7 @@ rules:
   - aigateway.envoyproxy.io
   resources:
   - aigatewayroutes
+  - aiservicebackends
   verbs:
   - create
   - delete
@@ -105,6 +106,7 @@ rules:
 - apiGroups:
   - gateway.envoyproxy.io
   resources:
+  - backends
   - backendtrafficpolicies
   - securitypolicies
   verbs:

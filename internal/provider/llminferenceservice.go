@@ -118,7 +118,7 @@ func validateLLM(c *controller.Context) error {
 		return fmt.Errorf("externalAccess EnvoyAIGateway requires aiGateway.enabled in the provider chart")
 	}
 	if topo.UsesAIGateway() {
-		if err := validateAIGatewayAccess(c, servedModelName(c.Name(), params.ModelName)); err != nil {
+		if err := validateAIGatewayAccess(c, servedModelName(c.Name(), params.ModelName), fmt.Sprintf("set a different %s.parameters.modelName", common.ComponentLlmEngine)); err != nil {
 			return err
 		}
 	}
@@ -908,7 +908,7 @@ func (p *Provider) syncLLM(c *controller.Context) error {
 		comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
 		var params components.VllmCustomSpec
 		c.TryDecodeComponentParameters(comp, &params)
-		return syncAIGateway(c, servedModelName(c.Name(), params.ModelName), topo.TokenLimitPerHour)
+		return syncAIGateway(c, servedModelName(c.Name(), params.ModelName), topo.TokenLimitPerHour, inferencePoolBackendRef(c.Name()))
 	}
 
 	// AI Gateway not enabled — clean up any leftover AI Gateway resources.
