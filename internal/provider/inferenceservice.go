@@ -9,13 +9,16 @@ import (
 	"strconv"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,6 +53,7 @@ type predictorSpec struct {
 	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 	SecurityContext           *corev1.PodSecurityContext        `json:"securityContext,omitempty"`
+	DeploymentStrategy        *appsv1.DeploymentStrategy        `json:"deploymentStrategy,omitempty"`
 	Model                     *modelSpec                        `json:"model,omitempty"`
 }
 
@@ -152,8 +156,13 @@ func validatePredictor(c *controller.Context) error {
 	if params.StorageURI == "" {
 		return fmt.Errorf("%s.parameters.storageURI is required", common.ComponentPredictor)
 	}
-	if params.MinReplicas != nil && *params.MinReplicas < 0 {
-		return fmt.Errorf("%s.parameters.minReplicas must not be negative", common.ComponentPredictor)
+	// KServe's HPA raises a floor below 1 to 1 in Standard mode, so 0 would
+	// silently keep one replica instead of scaling to zero.
+	if params.MinReplicas != nil && *params.MinReplicas < 1 {
+		return fmt.Errorf("%s.parameters.minReplicas must be at least 1: scale-to-zero is not supported in KServe Standard mode", common.ComponentPredictor)
+	}
+	if params.MinReplicas == nil && comp.Replicas != nil && *comp.Replicas < 1 {
+		return fmt.Errorf("%s.replicas must be at least 1: scale-to-zero is not supported in KServe Standard mode", common.ComponentPredictor)
 	}
 	if params.GpuCount != nil && *params.GpuCount < 0 {
 		return fmt.Errorf("%s.parameters.gpuCount must not be negative", common.ComponentPredictor)
@@ -301,6 +310,10 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 		predictor.Tolerations = policy.Tolerations
 		predictor.TopologySpreadConstraints = controller.TopologySpreadConstraints(policy, predictor.Labels)
 	}
+	if requestsGPU(resources) {
+		predictor.Tolerations = withGPUTolerations(predictor.Tolerations, resources)
+		predictor.DeploymentStrategy = gpuDeploymentStrategy()
+	}
 
 	switch {
 	case params.MinReplicas != nil:
@@ -385,6 +398,40 @@ func requestsGPU(res *corev1.ResourceRequirements) bool {
 		}
 	}
 	return false
+}
+
+// withGPUTolerations tolerates the NoSchedule taint named after each GPU
+// resource the predictor requests (e.g. nvidia.com/gpu, set by the NVIDIA GPU
+// Operator and many managed GPU node pools), unless a toleration already
+// covers it.
+func withGPUTolerations(tolerations []corev1.Toleration, res *corev1.ResourceRequirements) []corev1.Toleration {
+	out := slices.Clone(tolerations)
+	for _, name := range slices.Sorted(maps.Keys(res.Limits)) {
+		if !strings.HasSuffix(string(name), "/gpu") {
+			continue
+		}
+		key := string(name)
+		covered := slices.ContainsFunc(out, func(t corev1.Toleration) bool {
+			keyMatch := t.Key == key || (t.Key == "" && t.Operator == corev1.TolerationOpExists)
+			return keyMatch && (t.Effect == "" || t.Effect == corev1.TaintEffectNoSchedule)
+		})
+		if !covered {
+			out = append(out, corev1.Toleration{Key: key, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule})
+		}
+	}
+	return out
+}
+
+// gpuDeploymentStrategy replaces pods one at a time without surging: a surge
+// pod would wait for a GPU still held by the pod it replaces.
+func gpuDeploymentStrategy() *appsv1.DeploymentStrategy {
+	return &appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxSurge:       ptr.To(intstr.FromInt32(0)),
+			MaxUnavailable: ptr.To(intstr.FromInt32(1)),
+		},
+	}
 }
 
 // usesHFTokenServiceAccount reports whether the predictor downloads from the

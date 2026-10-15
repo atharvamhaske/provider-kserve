@@ -62,7 +62,7 @@ provider itself is covered under [Installation](#installation).
 | Capability | Status | Notes |
 |---|---|---|
 | Provisioning | ✅ | |
-| Horizontal scaling | ✅ | `predictor`: `minReplicas` / `maxReplicas` (`0` enables scale-to-zero). `llm`: static `replicas`, or WVA `minReplicas` / `maxReplicas` + `scalingActuator` (`hpa` \| `keda`) on decode and prefill. LLM min is ≥ 1 (no scale-to-zero). With `workerCount`, one replica is a full head+worker ring. |
+| Horizontal scaling | ✅ | `predictor`: `minReplicas` / `maxReplicas` (≥ 1; no scale-to-zero in KServe Standard mode). `llm`: static `replicas`, or WVA `minReplicas` / `maxReplicas` + `scalingActuator` (`hpa` \| `keda`) on decode and prefill. LLM min is ≥ 1 (no scale-to-zero). With `workerCount`, one replica is a full head+worker ring. |
 | Vertical scaling (CPU / memory) | ✅ | `spec.components.<name>.resources`; limits are mirrored into requests (Guaranteed QoS) |
 | Version upgrades | ✅ | of the deployed serving runtime version — change `spec.version`; see [Versions](#versions) |
 | Custom configuration | ✅ | structured parameters, plus inline spec config for both `llm` and `predictor` |
@@ -257,14 +257,14 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `storageURI` | string | Model artifacts location. **Required** unless `model` is set. |
 | `runtimeVersion` | string | Pin the serving runtime version. |
 | `runtime` | string | Explicitly select a (Cluster)ServingRuntime by name. |
-| `minReplicas` | int32 | Autoscaling floor (`0` enables scale-to-zero). |
+| `minReplicas` | int32 | Autoscaling floor (≥ 1). KServe Standard mode raises a lower floor to 1, so `0` is rejected rather than silently ignored. |
 | `maxReplicas` | int32 | Autoscaling ceiling. |
 | `config` | string | Inline `InferenceService` spec body. Structured fields win conflicts. See [Predictor inline config](#predictor-inline-config). |
 | `storageContainer` | string | `ClusterStorageContainer` that downloads the model (`spec.predictor.storageContainerName`). Empty lets KServe match one on the URI scheme. Validation fails if it is missing, disabled, or does not support `storageURI`. |
 | `env` | []EnvVar | Extra environment variables on the model server container (supports `valueFrom`). |
 | `args` | []string | Appended to the serving runtime's arguments, e.g. `--task=text_embedding`. |
 | `task` | string | Hugging Face runtime task (`--task`), e.g. `text_embedding`. Only with `modelFormat: huggingface`; a `--task` in `args` wins. |
-| `gpuCount` | int32 | GPUs (`nvidia.com/gpu`) per predictor pod. Unset takes the catalog entry's value; `0` runs on CPU. |
+| `gpuCount` | int32 | GPUs (`nvidia.com/gpu`) per predictor pod. Unset takes the catalog entry's value; `0` runs on CPU. GPU predictors tolerate the `nvidia.com/gpu` `NoSchedule` taint and roll out without a surge pod. |
 | `serviceAccountName` | string | ServiceAccount the predictor pods run as (e.g. one bound to cloud IAM). Empty uses the namespace default. |
 | `labels` | map | Added to the InferenceService; KServe copies them to the pods. Provider-managed keys are rejected. |
 | `annotations` | map | Added to the InferenceService; KServe copies them to the pods. `serving.kserve.io/deploymentMode` is rejected. |
@@ -770,7 +770,13 @@ at 1Gi a 1.2 GB model already is.
 
 GPU `llm` Instances roll out with `rolloutStrategy: {maxSurge: 0, maxUnavailable: 1}`: pods are
 replaced one at a time without a surge pod, which would wait for a GPU still held by the pod it
-replaces. With one replica this means a short outage per rollout.
+replaces. With one replica this means a short outage per rollout. GPU `predictor` Instances get
+the same through `deploymentStrategy`.
+
+GPU nodes are commonly tainted (`nvidia.com/gpu:NoSchedule`, set by the NVIDIA GPU Operator and
+many managed GPU node pools) so that only GPU workloads land on them. GPU `predictor` pods
+tolerate the taint named after each GPU resource they request, so they schedule there without
+extra settings; other tolerations come from `schedulingPolicy`.
 
 ### Observability
 

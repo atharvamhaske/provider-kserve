@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -705,6 +706,78 @@ func TestValidatePredictorGPUCount(t *testing.T) {
 		if err := validatePredictor(c); (err != nil) != wantErr {
 			t.Fatalf("%d: err = %v, wantErr %t", count, err, wantErr)
 		}
+	}
+}
+
+func TestValidatePredictorReplicaFloor(t *testing.T) {
+	cases := []struct {
+		name        string
+		replicas    *int32
+		minReplicas *int32
+		wantErr     bool
+	}{
+		{name: "minReplicas 0", minReplicas: ptr.To(int32(0)), wantErr: true},
+		{name: "minReplicas 1", minReplicas: ptr.To(int32(1))},
+		{name: "replicas 0 without minReplicas", replicas: ptr.To(int32(0)), wantErr: true},
+		{name: "minReplicas overrides replicas", replicas: ptr.To(int32(0)), minReplicas: ptr.To(int32(2))},
+		{name: "neither set"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := predictorContext(t, nil, corev1alpha1.ComponentSpec{
+				Replicas:   tc.replicas,
+				Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", MinReplicas: tc.minReplicas}),
+			})
+			if err := validatePredictor(c); (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestBuildInferenceServiceGPUScheduling(t *testing.T) {
+	gpuTaint := corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}
+	userToleration := corev1.Toleration{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "ml", Effect: corev1.TaintEffectNoSchedule}
+	cases := []struct {
+		name            string
+		gpuCount        *int32
+		tolerations     []corev1.Toleration
+		wantTolerations []corev1.Toleration
+		wantStrategy    bool
+	}{
+		{name: "CPU predictor keeps defaults", tolerations: []corev1.Toleration{userToleration}, wantTolerations: []corev1.Toleration{userToleration}},
+		{name: "GPU predictor tolerates the GPU taint", gpuCount: ptr.To(int32(1)), wantTolerations: []corev1.Toleration{gpuTaint}, wantStrategy: true},
+		{name: "user tolerations are kept", gpuCount: ptr.To(int32(1)), tolerations: []corev1.Toleration{userToleration}, wantTolerations: []corev1.Toleration{userToleration, gpuTaint}, wantStrategy: true},
+		{name: "an existing GPU toleration is not duplicated", gpuCount: ptr.To(int32(1)), tolerations: []corev1.Toleration{{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists}}, wantTolerations: []corev1.Toleration{{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists}}, wantStrategy: true},
+		{name: "a tolerate-everything toleration covers it", gpuCount: ptr.To(int32(1)), tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}}, wantTolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}}, wantStrategy: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			comp := corev1alpha1.ComponentSpec{
+				Parameters: rawJSON(t, components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: "hf://org/model", GpuCount: tc.gpuCount}),
+			}
+			if tc.tolerations != nil {
+				comp.SchedulingPolicy = &commonv1alpha1.SchedulingPolicy{Tolerations: tc.tolerations}
+			}
+			isvc, err := buildInferenceService(predictorContext(t, nil, comp))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var spec inferenceServiceSpec
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(isvc.Object["spec"].(map[string]any), &spec); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(spec.Predictor.Tolerations, tc.wantTolerations) {
+				t.Fatalf("tolerations = %+v\nwant %+v", spec.Predictor.Tolerations, tc.wantTolerations)
+			}
+			want := (*appsv1.DeploymentStrategy)(nil)
+			if tc.wantStrategy {
+				want = gpuDeploymentStrategy()
+			}
+			if !reflect.DeepEqual(spec.Predictor.DeploymentStrategy, want) {
+				t.Fatalf("deploymentStrategy = %+v, want %+v", spec.Predictor.DeploymentStrategy, want)
+			}
+		})
 	}
 }
 

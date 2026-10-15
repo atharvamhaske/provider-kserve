@@ -16,3 +16,28 @@ spec:
           nvidia.com/gpu: "1"
         requests:
           memory: 8Gi
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+    deploymentStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-predictor-catalog-gpu-predictor
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  template:
+    spec:
+      (tolerations[?key == 'nvidia.com/gpu']):
+        - operator: Exists
+          effect: NoSchedule

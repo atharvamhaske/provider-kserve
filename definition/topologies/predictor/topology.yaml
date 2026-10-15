@@ -211,7 +211,7 @@ ui:
             label: Min Replicas
             defaultValue: 1
           validation:
-            min: 0
+            min: 1
             max: 32
             celExpressions:
             - celExpr: '!has(spec.components.predictor.parameters.minReplicas) || !has(spec.components.predictor.parameters.maxReplicas) || spec.components.predictor.parameters.minReplicas <= spec.components.predictor.parameters.maxReplicas'
