@@ -1,0 +1,40 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-config
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+    parameters:
+      enableMetrics: false
+  components:
+    predictor:
+      type: modelServer
+      parameters:
+        modelFormat: sklearn
+        storageURI: gs://kfserving-examples/models/sklearn/1.0/model
+        minReplicas: 1
+        maxReplicas: 3
+        args: [--workers=2]
+        config: |
+          predictor:
+            minReplicas: 5
+            maxReplicas: 9
+            batcher:
+              maxBatchSize: 8
+              maxLatency: 100
+            logger:
+              mode: all
+              url: http://request-logger.default.svc.cluster.local
+            model:
+              modelFormat:
+                name: xgboost
+              storageUri: gs://wrong/model
+              args: [--workers=9, --raw-only]
+              livenessProbe:
+                httpGet:
+                  path: /v1/models/test-predictor-config
+                  port: 8080
+                initialDelaySeconds: 30

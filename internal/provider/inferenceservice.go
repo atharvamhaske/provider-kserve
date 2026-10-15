@@ -40,7 +40,7 @@ type inferenceServiceSpec struct {
 
 type predictorSpec struct {
 	MinReplicas               *int32                            `json:"minReplicas,omitempty"`
-	MaxReplicas               int32                             `json:"maxReplicas,omitempty"`
+	MaxReplicas               *int32                            `json:"maxReplicas,omitempty"`
 	Labels                    map[string]string                 `json:"labels,omitempty"`
 	StorageContainerName      string                            `json:"storageContainerName,omitempty"`
 	ServiceAccountName        string                            `json:"serviceAccountName,omitempty"`
@@ -181,7 +181,13 @@ func validatePredictor(c *controller.Context) error {
 	default:
 		return fmt.Errorf("topology.parameters.externalAccess must be ClusterIP, LoadBalancer or NodePort")
 	}
-	return validatePredictorMetadata(c, params)
+	if err := validatePredictorMetadata(c, params); err != nil {
+		return err
+	}
+	if params.Config != "" {
+		return validatePredictorConfig(c)
+	}
+	return nil
 }
 
 // validatePredictorMetadata rejects user labels and annotations that are
@@ -302,9 +308,7 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	case comp.Replicas != nil:
 		predictor.MinReplicas = comp.Replicas
 	}
-	if params.MaxReplicas != nil {
-		predictor.MaxReplicas = *params.MaxReplicas
-	}
+	predictor.MaxReplicas = params.MaxReplicas
 	predictor.StorageContainerName = params.StorageContainer
 	if usesHFTokenServiceAccount(params) {
 		predictor.ServiceAccountName = modelPullerSAName(c.Name())
@@ -321,6 +325,12 @@ func buildInferenceService(c *controller.Context) (*unstructured.Unstructured, e
 	spec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&inferenceServiceSpec{Predictor: predictor})
 	if err != nil {
 		return nil, fmt.Errorf("building InferenceService spec: %w", err)
+	}
+	if params.Config != "" {
+		spec, err = mergePredictorConfig(params.Config, spec)
+		if err != nil {
+			return nil, fmt.Errorf("%s.parameters.config: %w", common.ComponentPredictor, err)
+		}
 	}
 	isvc := unstructuredObject(inferenceServiceGVK)
 	isvc.SetName(meta.Name)

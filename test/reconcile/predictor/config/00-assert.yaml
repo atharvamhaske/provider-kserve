@@ -1,0 +1,26 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: test-predictor-config
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 3
+    batcher:
+      maxBatchSize: 8
+      maxLatency: 100
+    logger:
+      mode: all
+      url: http://request-logger.default.svc.cluster.local
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: gs://kfserving-examples/models/sklearn/1.0/model
+      (args == ['--workers=2']): true
+      livenessProbe:
+        httpGet:
+          path: /v1/models/test-predictor-config
+          port: 8080
+        initialDelaySeconds: 30

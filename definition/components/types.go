@@ -189,6 +189,11 @@ type ModelServerCustomSpec struct {
 	// letting KServe auto-select one from the model format.
 	Runtime string `json:"runtime,omitempty"`
 
+	// Config is an inline InferenceService spec body (YAML). Nested maps are
+	// merged with the generated spec; structured fields win and lists are
+	// replaced, not appended. The merged resource is validated by the API server.
+	Config string `json:"config,omitempty"`
+
 	// MinReplicas is the autoscaling floor (0 enables scale-to-zero).
 	MinReplicas *int32 `json:"minReplicas,omitempty"`
 
