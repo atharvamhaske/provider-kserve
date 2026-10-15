@@ -78,6 +78,12 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ $name }}
+      # The registry is external: skip the cluster search domains, each of
+      # which costs a full DNS timeout when upstream DNS is slow.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -109,11 +115,23 @@ spec:
             - /bin/sh
             - -ec
             - |
+              # Retry in-process: one DNS or registry hiccup must not use up the
+              # Job deadline on pod restarts.
+              fetch() {
+                for attempt in 1 2 3 4 5; do
+                  if helm template "$1" "${REGISTRY}/$1" --version "${VERSION}" > "/tmp/$1.yaml"; then
+                    return 0
+                  fi
+                  echo "Fetching ${REGISTRY}/$1:${VERSION} failed (attempt ${attempt}/5), retrying"
+                  sleep $((attempt * 5))
+                done
+                return 1
+              }
               applied=""
               for chart in {{ join " " .Values.kserveCRDs.charts }}; do
                 echo "Applying ${REGISTRY}/${chart}:${VERSION}"
-                applied="${applied} $(helm template "${chart}" "${REGISTRY}/${chart}" --version "${VERSION}" \
-                  | kubectl apply --server-side --force-conflicts --field-manager=provider-kserve-crds -o name -f -)"
+                fetch "${chart}"
+                applied="${applied} $(kubectl apply --server-side --force-conflicts --field-manager=provider-kserve-crds -o name -f "/tmp/${chart}.yaml")"
               done
               kubectl wait --for=condition=Established --timeout=120s ${applied}
           resources:
