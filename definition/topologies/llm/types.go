@@ -137,9 +137,9 @@ func (t LlmTopologyParameters) ResolvedServiceType() corev1.ServiceType {
 	}
 }
 
-// UnmarshalJSON accepts JSON booleans and UI select strings ("true"/"false")
-// for flag fields. Everest's form generator has no switch uiType, so flags are
-// rendered as Enabled/Disabled selects.
+// UnmarshalJSON accepts JSON booleans and "true"/"false" strings for flag
+// fields: Instances created before the UI rendered flags as toggles store
+// strings.
 func (t *LlmTopologyParameters) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

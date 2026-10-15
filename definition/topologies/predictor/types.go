@@ -40,9 +40,8 @@ func (t PredictorTopologyParameters) MetricsEnabled() bool {
 	return t.EnableMetrics == nil || *t.EnableMetrics
 }
 
-// UnmarshalJSON also accepts "true"/"false" strings for enableMetrics: the UI
-// renders it as a select, as in the llm topology, because the form keeps the
-// value when switching topology and the llm field stores a string.
+// UnmarshalJSON also accepts "true"/"false" strings for enableMetrics, which
+// Instances created before the UI rendered it as a toggle store.
 func (t *PredictorTopologyParameters) UnmarshalJSON(data []byte) error {
 	type plain PredictorTopologyParameters
 	aux := struct {

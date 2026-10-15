@@ -324,16 +324,11 @@ ui:
       description: Split prefill and decode into independently scaled deployments (llm-d pattern).
       components:
         enablePrefill:
-          uiType: select
+          uiType: toggle
           path: spec.topology.parameters.enablePrefill
           fieldParams:
             label: Enable Prefill/Decode Disaggregation
-            defaultValue: "false"
-            options:
-            - label: Disabled
-              value: "false"
-            - label: Enabled
-              value: "true"
+            defaultValue: false
         prefillReplicas:
           uiType: number
           path: spec.topology.parameters.prefillReplicas
@@ -354,7 +349,7 @@ ui:
             min: 1
             max: 32
             celExpressions:
-            - celExpr: '!has(spec.topology.parameters.prefillMinReplicas) || spec.topology.parameters.enablePrefill == "true"'
+            - celExpr: '!has(spec.topology.parameters.prefillMinReplicas) || spec.topology.parameters.enablePrefill == true'
               message: Prefill min replicas requires Enable Prefill/Decode Disaggregation
             - celExpr: '!has(spec.topology.parameters.prefillMinReplicas) || !has(spec.topology.parameters.prefillMaxReplicas) || spec.topology.parameters.prefillMinReplicas <= spec.topology.parameters.prefillMaxReplicas'
               message: Prefill min replicas cannot exceed Prefill max replicas
@@ -368,7 +363,7 @@ ui:
             min: 1
             max: 32
             celExpressions:
-            - celExpr: '!has(spec.topology.parameters.prefillMaxReplicas) || spec.topology.parameters.enablePrefill == "true"'
+            - celExpr: '!has(spec.topology.parameters.prefillMaxReplicas) || spec.topology.parameters.enablePrefill == true'
               message: Prefill max replicas requires Enable Prefill/Decode Disaggregation
         prefillScalingActuator:
           uiType: select
@@ -386,7 +381,7 @@ ui:
               value: hpa
           validation:
             celExpressions:
-            - celExpr: '!has(spec.topology.parameters.prefillScalingActuator) || spec.topology.parameters.enablePrefill == "true"'
+            - celExpr: '!has(spec.topology.parameters.prefillScalingActuator) || spec.topology.parameters.enablePrefill == true'
               message: Prefill autoscaling actuator requires Enable Prefill/Decode Disaggregation
             - celExpr: '!has(spec.topology.parameters.prefillScalingActuator) || has(spec.topology.parameters.prefillMaxReplicas) || has(spec.topology.parameters.prefillMinReplicas)'
               message: Prefill autoscaling actuator requires Prefill min or max replicas
@@ -400,7 +395,7 @@ ui:
             min: 1
             max: 16
             celExpressions:
-            - celExpr: '!has(spec.topology.parameters.prefillPipelineParallelSize) || spec.topology.parameters.enablePrefill == "true"'
+            - celExpr: '!has(spec.topology.parameters.prefillPipelineParallelSize) || spec.topology.parameters.enablePrefill == true'
               message: Prefill pipeline parallel size requires Enable Prefill/Decode Disaggregation
         prefillWorkerCount:
           uiType: number
@@ -412,7 +407,7 @@ ui:
             min: 1
             max: 16
             celExpressions:
-            - celExpr: '!has(spec.topology.parameters.prefillWorkerCount) || spec.topology.parameters.enablePrefill == "true"'
+            - celExpr: '!has(spec.topology.parameters.prefillWorkerCount) || spec.topology.parameters.enablePrefill == true'
               message: Prefill worker count requires Enable Prefill/Decode Disaggregation
             - celExpr: '!has(spec.topology.parameters.prefillWorkerCount) || (has(spec.topology.parameters.prefillPipelineParallelSize) && spec.topology.parameters.prefillPipelineParallelSize == spec.topology.parameters.prefillWorkerCount + 1)'
               message: Prefill pipeline parallel size must equal Prefill worker count + 1
@@ -539,33 +534,23 @@ ui:
         metrics.podMonitor.enabled — view them in Grafana (gateway dashboard).
       components:
         enableMetrics:
-          uiType: select
+          uiType: toggle
           path: spec.topology.parameters.enableMetrics
           fieldParams:
             label: vLLM Prometheus metrics
-            defaultValue: "true"
+            defaultValue: true
             helperText: >-
               Emits a PodMonitor for this instance's vLLM /metrics endpoint.
               Requires Prometheus Operator in the cluster.
-            options:
-            - label: Enabled
-              value: "true"
-            - label: Disabled
-              value: "false"
         enableTracing:
-          uiType: select
+          uiType: toggle
           path: spec.topology.parameters.enableTracing
           fieldParams:
             label: Distributed tracing (OTLP)
-            defaultValue: "false"
+            defaultValue: false
             helperText: >-
               Enables KServe distributed tracing across the gateway, scheduler
               and model components. Requires an OpenTelemetry collector.
-            options:
-            - label: Disabled
-              value: "false"
-            - label: Enabled
-              value: "true"
         tracingEndpoint:
           uiType: text
           path: spec.topology.parameters.tracingEndpoint

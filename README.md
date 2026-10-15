@@ -336,6 +336,27 @@ an OpenAI-compatible `/openai/v1/embeddings` endpoint. See
 | `enableTracing` | bool | Enable KServe distributed tracing (OTLP) across gateway/scheduler/model. Disabled by default. |
 | `tracingEndpoint` | string | Optional OTLP exporter endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT`); used only when `enableTracing` is true. |
 
+#### Upgrading flags from 0.3.0 and earlier
+
+The UI renders `enableMetrics`, `enableTracing` and `enablePrefill` as toggles and stores
+booleans. Instances created through the UI with 0.3.0 or earlier store them as the strings
+`"true"`/`"false"`. The provider still reads those, but the UI toggle shows any string as on
+and cannot save the section. Convert them once (needs `jq`):
+
+```bash
+kubectl get instances.core.openeverest.io -A -o json | jq -c '.items[]
+  | select(.spec.providerRef.name == "provider-kserve")
+  | {ns: .metadata.namespace, name: .metadata.name,
+     p: ((.spec.topology.parameters // {}) | with_entries(select(
+          (.key | IN("enableMetrics", "enableTracing", "enablePrefill"))
+          and (.value | type == "string"))) | map_values(. == "true"))}
+  | select(.p != {})' |
+while read -r i; do
+  kubectl -n "$(jq -r .ns <<<"$i")" patch instance "$(jq -r .name <<<"$i")" \
+    --type=merge -p "$(jq -c '{spec: {topology: {parameters: .p}}}' <<<"$i")"
+done
+```
+
 ### Accessing the model
 
 vLLM serves an OpenAI-compatible API on **port 8000**. In Standard mode KServe only
@@ -874,6 +895,7 @@ kubectl logs -n everest-system deploy/provider-kserve -f
 | Gated model download fails | Create the `HF_TOKEN` secret and set `huggingface.tokenSecretName` |
 | `llm` model pod `Init:OOMKilled` | Raise `storageInitializer.resources.limits.memory` (KServe defaults to 1Gi) |
 | New `llm` model pod `Pending` with `Insufficient nvidia.com/gpu` after a change | The old pod holds the GPU; GPU Instances roll out without surge, so check the `computeProfile` is `gpu` |
+| UI shows a disabled flag as on, or Save stays disabled in Observability / Disaggregated Serving | The Instance stores the flag as a string; see [Upgrading flags from 0.3.0 and earlier](#upgrading-flags-from-030-and-earlier) |
 
 ## Contributing
 

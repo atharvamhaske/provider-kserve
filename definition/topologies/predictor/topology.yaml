@@ -263,21 +263,14 @@ ui:
       label: Observability
       components:
         enableMetrics:
-          # A select, not a toggle: the form keeps this path's value across a
-          # topology switch, and the llm field stores "true"/"false" strings.
-          uiType: select
+          uiType: toggle
           path: spec.topology.parameters.enableMetrics
           fieldParams:
             label: Prometheus metrics
-            defaultValue: "true"
+            defaultValue: true
             helperText: >-
               Emits a PodMonitor for the model server's metrics endpoint.
               Requires the Prometheus Operator in the cluster.
-            options:
-            - label: Enabled
-              value: "true"
-            - label: Disabled
-              value: "false"
       componentsOrder:
       - enableMetrics
   sectionsOrder:
