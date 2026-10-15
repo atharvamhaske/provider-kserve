@@ -119,7 +119,7 @@ func TestRoutingConfigRefs(t *testing.T) {
 func TestBuildAIGatewayRoute(t *testing.T) {
 	t.Parallel()
 
-	route := buildAIGatewayRoute("chat", "models", "llama", "shared", "gateway-system")
+	route := buildAIGatewayRoute("chat", "models", "llama", "shared", "gateway-system", inferencePoolBackendRef("chat"))
 	if route.GetName() != "chat-ai-gateway" {
 		t.Fatalf("route name = %q, want chat-ai-gateway", route.GetName())
 	}

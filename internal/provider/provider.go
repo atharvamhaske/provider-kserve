@@ -127,7 +127,10 @@ func (p *Provider) Cleanup(c *controller.Context) error {
 		isvc := unstructuredObject(inferenceServiceGVK)
 		isvc.SetName(c.Name())
 		isvc.SetNamespace(c.Namespace())
-		return c.Delete(isvc)
+		if err := c.Delete(isvc); err != nil {
+			return err
+		}
+		return c.Delete(&corev1.Secret{ObjectMeta: c.ObjectMeta(aiGatewayKeySecretName(c.Name()))})
 	default:
 		return nil
 	}

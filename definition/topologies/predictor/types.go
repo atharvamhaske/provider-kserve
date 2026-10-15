@@ -16,9 +16,10 @@ import (
 
 // External access modes for the predictor topology.
 const (
-	ExternalAccessClusterIP    = "ClusterIP"
-	ExternalAccessLoadBalancer = "LoadBalancer"
-	ExternalAccessNodePort     = "NodePort"
+	ExternalAccessClusterIP      = "ClusterIP"
+	ExternalAccessLoadBalancer   = "LoadBalancer"
+	ExternalAccessNodePort       = "NodePort"
+	ExternalAccessEnvoyAIGateway = "EnvoyAIGateway"
 )
 
 // PredictorTopologyParameters defines the topology-level parameters for the
@@ -26,9 +27,16 @@ const (
 // these are cross-cutting deployment options that shape the generated
 // InferenceService.
 type PredictorTopologyParameters struct {
-	// ExternalAccess is the client access path: ClusterIP, LoadBalancer, or
-	// NodePort. When set it takes precedence over predictor.service.serviceType.
+	// ExternalAccess is the client access path: ClusterIP, LoadBalancer,
+	// NodePort, or EnvoyAIGateway (OpenAI-compatible predictors only, through
+	// the provider's shared Gateway). When set it takes precedence over
+	// predictor.service.serviceType.
 	ExternalAccess string `json:"externalAccess,omitempty"`
+
+	// TokenLimitPerHour is the per-API-key token quota for this model through
+	// the Envoy AI Gateway. Used only with a Redis-compatible rate-limit
+	// backend; unset uses the provider default.
+	TokenLimitPerHour *int32 `json:"tokenLimitPerHour,omitempty"`
 
 	// EnableMetrics emits a Prometheus Operator PodMonitor for the predictor
 	// pods. Unset means enabled, as for the llm topology.
@@ -69,6 +77,12 @@ func (t *PredictorTopologyParameters) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// UsesAIGateway reports whether clients reach the predictor through the Envoy
+// AI Gateway.
+func (t PredictorTopologyParameters) UsesAIGateway() bool {
+	return t.ExternalAccess == ExternalAccessEnvoyAIGateway
+}
+
 // ResolvedServiceType returns the Kubernetes Service type implied by
 // ExternalAccess. Empty means "defer to predictor.service.serviceType".
 func (t PredictorTopologyParameters) ResolvedServiceType() corev1.ServiceType {
@@ -77,7 +91,7 @@ func (t PredictorTopologyParameters) ResolvedServiceType() corev1.ServiceType {
 		return corev1.ServiceTypeLoadBalancer
 	case ExternalAccessNodePort:
 		return corev1.ServiceTypeNodePort
-	case ExternalAccessClusterIP:
+	case ExternalAccessClusterIP, ExternalAccessEnvoyAIGateway:
 		return corev1.ServiceTypeClusterIP
 	default:
 		return ""

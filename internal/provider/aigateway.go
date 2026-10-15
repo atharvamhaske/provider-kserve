@@ -42,12 +42,21 @@ var (
 	backendTrafficPolicyGVK = schema.GroupVersionKind{
 		Group: "gateway.envoyproxy.io", Version: "v1alpha1", Kind: "BackendTrafficPolicy",
 	}
+	aiServiceBackendGVK = schema.GroupVersionKind{
+		Group: "aigateway.envoyproxy.io", Version: "v1beta1", Kind: "AIServiceBackend",
+	}
+	envoyBackendGVK = schema.GroupVersionKind{
+		Group: "gateway.envoyproxy.io", Version: "v1alpha1", Kind: "Backend",
+	}
 	gatewayGVK = schema.GroupVersionKind{
 		Group: "gateway.networking.k8s.io", Version: "v1", Kind: "Gateway",
 	}
 )
 
-func syncAIGateway(c *controller.Context, modelName string, tokenLimit *int32) error {
+// syncAIGateway registers the Instance on the shared AI Gateway: its API key,
+// any backend objects the route needs, the route to backendRef, and the token
+// rate limit.
+func syncAIGateway(c *controller.Context, modelName string, tokenLimit *int32, backendRef map[string]any, backends ...*unstructured.Unstructured) error {
 	if !common.AIGatewayEnabled() {
 		return fmt.Errorf("ai gateway is enabled for the instance but disabled in the provider chart")
 	}
@@ -65,7 +74,13 @@ func syncAIGateway(c *controller.Context, modelName string, tokenLimit *int32) e
 		}
 	}
 
-	route := buildAIGatewayRoute(c.Name(), c.Instance().Namespace, modelName, gatewayName, gatewayNamespace)
+	for _, backend := range backends {
+		if err := common.Apply(c.Context(), c.Client(), c.Instance(), backend); err != nil {
+			return fmt.Errorf("applying ai gateway %s: %w", backend.GetKind(), err)
+		}
+	}
+
+	route := buildAIGatewayRoute(c.Name(), c.Instance().Namespace, modelName, gatewayName, gatewayNamespace, backendRef)
 	if err := common.Apply(c.Context(), c.Client(), c.Instance(), route); err != nil {
 		return fmt.Errorf("applying ai gateway route: %w", err)
 	}
@@ -90,8 +105,9 @@ func cleanupAIGateway(c *controller.Context) error {
 
 // validateAIGatewayAccess enforces the invariants API keys rely on: keys only
 // travel over HTTPS, and a model name maps to exactly one route because the
-// Gateway authorizes keys by model name.
-func validateAIGatewayAccess(c *controller.Context, modelName string) error {
+// Gateway authorizes keys by model name. fix tells the user how to pick
+// another model name.
+func validateAIGatewayAccess(c *controller.Context, modelName, fix string) error {
 	if common.AIGatewayAuthEnabled() && common.AIGatewayScheme() != "https" && !common.AIGatewayAuthAllowInsecureHTTP() {
 		return fmt.Errorf("API keys for the Envoy AI Gateway require HTTPS: enable aiGateway.tls in the provider chart " +
 			"(or set aiGateway.auth.allowInsecureHTTP for local development)")
@@ -112,8 +128,8 @@ func validateAIGatewayAccess(c *controller.Context, modelName string) error {
 			continue
 		}
 		if slices.Contains(aiGatewayRouteModels(route), modelName) {
-			return fmt.Errorf("model name %q is already served through the Envoy AI Gateway by %s/%s; set a different %s.parameters.modelName",
-				modelName, route.GetNamespace(), route.GetName(), common.ComponentLlmEngine)
+			return fmt.Errorf("model name %q is already served through the Envoy AI Gateway by %s/%s; %s",
+				modelName, route.GetNamespace(), route.GetName(), fix)
 		}
 	}
 	return nil
@@ -129,6 +145,49 @@ func deleteAIGatewayObject(c *controller.Context, gvk schema.GroupVersionKind, s
 
 func aiGatewayRouteName(instanceName string) string {
 	return knativekmeta.ChildName(instanceName, aiGatewayRouteSuffix)
+}
+
+// inferencePoolBackendRef routes to the llm topology's InferencePool.
+func inferencePoolBackendRef(instanceName string) map[string]any {
+	return map[string]any{
+		"group": "inference.networking.k8s.io",
+		"kind":  "InferencePool",
+		"name":  knativekmeta.ChildName(instanceName, inferencePoolSuffix),
+	}
+}
+
+// buildServiceBackends returns the Envoy Gateway Backend for an in-cluster
+// Service and the AIServiceBackend that speaks the OpenAI API to it under
+// pathPrefix; AIServiceBackends cannot reference a Service directly. Both
+// share the route's name.
+func buildServiceBackends(instanceName, namespace, host string, port int32, pathPrefix string) (backend, aiBackend *unstructured.Unstructured) {
+	name := aiGatewayRouteName(instanceName)
+	backend = &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": envoyBackendGVK.GroupVersion().String(),
+		"kind":       envoyBackendGVK.Kind,
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec": map[string]any{
+			"endpoints": []any{map[string]any{
+				"fqdn": map[string]any{"hostname": host, "port": int64(port)},
+			}},
+		},
+	}}
+	backend.SetGroupVersionKind(envoyBackendGVK)
+	aiBackend = &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": aiServiceBackendGVK.GroupVersion().String(),
+		"kind":       aiServiceBackendGVK.Kind,
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec": map[string]any{
+			"schema": map[string]any{"name": "OpenAI", "prefix": pathPrefix},
+			"backendRef": map[string]any{
+				"group": envoyBackendGVK.Group,
+				"kind":  envoyBackendGVK.Kind,
+				"name":  name,
+			},
+		},
+	}}
+	aiBackend.SetGroupVersionKind(aiServiceBackendGVK)
+	return backend, aiBackend
 }
 
 // aiGatewayRouteModels returns the model names an AIGatewayRoute matches on.
@@ -179,6 +238,7 @@ func buildAIGatewayRoute(
 	modelName,
 	gatewayName,
 	gatewayNamespace string,
+	backendRef map[string]any,
 ) *unstructured.Unstructured {
 	name := knativekmeta.ChildName(instanceName, aiGatewayRouteSuffix)
 	parent := map[string]any{
@@ -207,12 +267,8 @@ func buildAIGatewayRoute(
 						"value": modelName,
 					}},
 				}},
-				"backendRefs": []any{map[string]any{
-					"group": "inference.networking.k8s.io",
-					"kind":  "InferencePool",
-					"name":  knativekmeta.ChildName(instanceName, inferencePoolSuffix),
-				}},
-				"timeouts": map[string]any{"request": "60s"},
+				"backendRefs": []any{backendRef},
+				"timeouts":    map[string]any{"request": "60s"},
 			}},
 			"llmRequestCosts": []any{
 				map[string]any{"metadataKey": "llm_input_token", "type": "InputToken"},
