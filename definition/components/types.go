@@ -245,4 +245,53 @@ type ModelServerCustomSpec struct {
 	// ContainerSecurityContext is the model server container's security
 	// context.
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// Image serves the model with this container image instead of a KServe
+	// serving runtime; model, modelFormat, runtime, runtimeVersion and task
+	// do not apply. Args, env, gpuCount and the component resources apply to
+	// this container, and storageURI (optional) is downloaded to /mnt/models.
+	Image string `json:"image,omitempty"`
+
+	// Command overrides the image entrypoint. Requires image.
+	Command []string `json:"command,omitempty"`
+
+	// Port is the HTTP port the image listens on (default 8080). Requires
+	// image.
+	Port *int32 `json:"port,omitempty"`
+
+	// HealthPath is an HTTP path on port that returns 200 once the model is
+	// loaded (e.g. /health); the pod gets no traffic before that. Requires
+	// image.
+	HealthPath string `json:"healthPath,omitempty"`
+
+	// OpenAICompatible marks an image that serves the OpenAI API under /v1,
+	// which makes it eligible for the Envoy AI Gateway. Requires image.
+	OpenAICompatible bool `json:"openAICompatible,omitempty"`
+
+	// ServedModelName is the model name the image expects in requests. The
+	// connection details report it, and the AI Gateway rewrites the Instance
+	// name to it. Requires image.
+	ServedModelName string `json:"servedModelName,omitempty"`
+
+	// ImagePullSecret names a Secret for pulling image from a private
+	// registry. Requires image.
+	ImagePullSecret string `json:"imagePullSecret,omitempty"`
+}
+
+// CustomContainerDefaultPort is the port a custom image is expected to listen
+// on when port is unset; KServe runtimes use the same.
+const CustomContainerDefaultPort int32 = 8080
+
+// UsesCustomContainer reports whether the predictor runs a user image instead
+// of a KServe serving runtime.
+func (s ModelServerCustomSpec) UsesCustomContainer() bool {
+	return s.Image != ""
+}
+
+// ContainerPort is the port the custom image listens on.
+func (s ModelServerCustomSpec) ContainerPort() int32 {
+	if s.Port != nil {
+		return *s.Port
+	}
+	return CustomContainerDefaultPort
 }

@@ -1,0 +1,15 @@
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: test-predictor-custom-invalid
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      parameters:
+        image: hashicorp/http-echo:1.0
+        modelFormat: sklearn

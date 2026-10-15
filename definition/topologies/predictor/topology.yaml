@@ -28,7 +28,9 @@ ui:
           path: spec.components.predictor.parameters.model
           fieldParams:
             label: Model
-            helperText: Pick a model from the catalog, or turn on Custom model below.
+            helperText: >-
+              Pick a model from the catalog, or turn on Custom model or Custom
+              container below.
             # Options come from spec.uiSchema.predictor.modelCatalog, injected by
             # the chart from `.Values.predictorModels` (see the llm modelURI note).
             optionsPath: spec.uiSchema.predictor.modelCatalog
@@ -116,6 +118,74 @@ ui:
           - modelFormat
           - storageURI
           - task
+        customContainer:
+          uiType: group
+          groupType: toggleable
+          label: Custom container
+          description: >-
+            Serve the model with your own image (e.g. vLLM, Text Embeddings
+            Inference, llama.cpp, NVIDIA NIM) instead of a KServe serving
+            runtime. Add arguments, environment variables, volumes or a helper
+            container under Advanced.
+          components:
+            image:
+              uiType: text
+              path: spec.components.predictor.parameters.image
+              fieldParams:
+                label: Image
+                placeholder: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+              validation:
+                required: true
+                celExpressions:
+                - celExpr: '!has(spec.components.predictor.parameters.modelFormat)'
+                  message: Turn off Custom model to serve a custom container
+            port:
+              uiType: number
+              path: spec.components.predictor.parameters.port
+              fieldParams:
+                label: Port
+                placeholder: "8080"
+                helperText: HTTP port the image listens on.
+              validation:
+                min: 1
+                max: 65535
+                int: true
+            healthPath:
+              uiType: text
+              path: spec.components.predictor.parameters.healthPath
+              fieldParams:
+                label: Health path
+                placeholder: /health
+                helperText: >-
+                  Returns 200 once the model is loaded; the pod gets no traffic
+                  before that. Empty sends traffic as soon as the container starts.
+            openAICompatible:
+              uiType: toggle
+              path: spec.components.predictor.parameters.openAICompatible
+              fieldParams:
+                label: OpenAI-compatible API under /v1
+                helperText: Allows the Envoy AI Gateway.
+            servedModelName:
+              uiType: text
+              path: spec.components.predictor.parameters.servedModelName
+              fieldParams:
+                label: Served model name
+                helperText: >-
+                  The model name the server expects in requests (e.g. vLLM's
+                  --served-model-name).
+            imagePullSecret:
+              uiType: text
+              path: spec.components.predictor.parameters.imagePullSecret
+              fieldParams:
+                label: Image pull secret
+                helperText: Secret in the Instance namespace for a private registry.
+          componentsOrder:
+          - image
+          - port
+          - healthPath
+          - openAICompatible
+          - servedModelName
+          - imagePullSecret
         version:
           uiType: select
           path: spec.components.predictor.version
@@ -130,6 +200,7 @@ ui:
       componentsOrder:
       - model
       - customModel
+      - customContainer
       - version
     runtime:
       label: Serving Runtime
@@ -232,8 +303,8 @@ ui:
       description: >-
         How clients reach the model. ClusterIP stays in-cluster; LoadBalancer
         and NodePort create a Service in front of the predictor pods; Envoy AI
-        Gateway publishes an embedding model on the shared Gateway, with an API
-        key.
+        Gateway publishes an embedding model or an OpenAI-compatible custom
+        container on the shared Gateway, with an API key.
       components:
         externalAccess:
           uiType: select
@@ -241,7 +312,9 @@ ui:
           fieldParams:
             label: External access
             defaultValue: ClusterIP
-            helperText: Envoy AI Gateway serves text embedding models only.
+            helperText: >-
+              Envoy AI Gateway serves text embedding models and OpenAI-compatible
+              custom containers.
             options:
             - label: ClusterIP
               value: ClusterIP
@@ -293,6 +366,30 @@ ui:
               Requires the Prometheus Operator in the cluster.
       componentsOrder:
       - enableMetrics
+    advanced:
+      label: Advanced
+      description: >-
+        InferenceService spec fields not exposed above (YAML), merged into the
+        generated spec; the fields above win. With a custom container, list it
+        as kserve-container to add arguments, env or volume mounts; a container
+        named transformer-container runs next to it and receives the traffic.
+      components:
+        config:
+          uiType: text
+          path: spec.components.predictor.parameters.config
+          fieldParams:
+            label: InferenceService (spec)
+            multiline: true
+            minRows: 4
+            maxRows: 20
+            placeholder: |2
+              predictor:
+                containers:
+                  - name: kserve-container
+                    args:
+                      - --model-id=BAAI/bge-small-en-v1.5
+      componentsOrder:
+      - config
   sectionsOrder:
   - basicInfo
   - runtime
@@ -301,3 +398,4 @@ ui:
   - routing
   - observability
   - scheduling
+  - advanced

@@ -252,9 +252,9 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 
 | Field | Type | Description |
 |---|---|---|
-| `model` | string | Name of a `predictorModels` catalog entry (the UI model picker). Supplies `modelFormat`, `storageURI` and `task`; ignored when `modelFormat` or `storageURI` is set. |
-| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required** unless `model` is set. |
-| `storageURI` | string | Model artifacts location. **Required** unless `model` is set. |
+| `model` | string | Name of a `predictorModels` catalog entry (the UI model picker). Supplies `modelFormat`, `storageURI` and `task`; ignored when `modelFormat`, `storageURI` or `image` is set. |
+| `modelFormat` | string | Model framework (e.g. `sklearn`). **Required** unless `model` or `image` is set. |
+| `storageURI` | string | Model artifacts location. **Required** unless `model` or `image` is set. With `image`, optional: downloaded to `/mnt/models`. |
 | `runtimeVersion` | string | Pin the serving runtime version. |
 | `runtime` | string | Explicitly select a (Cluster)ServingRuntime by name. |
 | `minReplicas` | int32 | Autoscaling floor (≥ 1). KServe Standard mode raises a lower floor to 1, so `0` is rejected rather than silently ignored. |
@@ -270,6 +270,13 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `annotations` | map | Added to the InferenceService; KServe copies them to the pods. `serving.kserve.io/deploymentMode` is rejected. |
 | `securityContext` | PodSecurityContext | Pod-level security context. |
 | `containerSecurityContext` | SecurityContext | Security context of the model server container. |
+| `image` | string | Serve with this container image instead of a KServe serving runtime. See [Custom containers](#custom-containers). |
+| `command` | []string | Overrides the image entrypoint. Requires `image`. |
+| `port` | int32 | HTTP port the image listens on (default 8080). Requires `image`. |
+| `healthPath` | string | HTTP path that returns 200 once the model is loaded (readiness probe). Requires `image`. |
+| `openAICompatible` | bool | The image serves the OpenAI API under `/v1`; allows the Envoy AI Gateway. Requires `image`. |
+| `servedModelName` | string | Model name the image expects in requests; reported as `model` in the connection details. Requires `image`. |
+| `imagePullSecret` | string | Secret for pulling `image` from a private registry. Requires `image`. |
 
 Resource requests default to the limits: otherwise KServe fills in the serving runtime's
 requests (2Gi memory for most runtimes), which a lower limit would make invalid.
@@ -281,7 +288,7 @@ tolerations, topology spread constraints) is applied to the predictor pods.
 
 | Field | Type | Description |
 |---|---|---|
-| `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, `NodePort`, or `EnvoyAIGateway` (embedding models only). Takes precedence over `predictor.service.serviceType`. |
+| `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, `NodePort`, or `EnvoyAIGateway` (embedding models and OpenAI-compatible custom containers). Takes precedence over `predictor.service.serviceType`. |
 | `tokenLimitPerHour` | int32 | Per-API-key hourly token quota. Only valid with Envoy AI Gateway. Defaults to 1000 when a Redis/Valkey rate-limit backend is configured. |
 | `enableMetrics` | bool | Emit a PodMonitor for the predictor pods. Defaults to enabled. |
 
@@ -452,7 +459,9 @@ the same `externalAccess` and `tokenLimitPerHour` parameters. They have no `Infe
 the route points at an `AIServiceBackend` and an Envoy Gateway `Backend` (both
 `<instance>-ai-gateway`) for the runtime's `/openai/v1` API on the `<instance>-predictor`
 Service. The model is served under the Instance name, which must therefore be unique across
-the Gateway. Other predictor models have no OpenAI-compatible API and are rejected.
+the Gateway. [Custom containers](#custom-containers) with `openAICompatible: true` use the
+Gateway the same way, for their `/v1` API; when `servedModelName` is set the Gateway rewrites
+the Instance name to it. Other predictor models have no OpenAI-compatible API and are rejected.
 
 ```bash
 curl "$GATEWAY_URL/v1/embeddings" \
@@ -719,9 +728,11 @@ The provider recursively merges maps, then gives generated structured fields
 precedence. For example, `minReplicas: 1` above wins over a raw
 `predictor.minReplicas: 5`. Raw-only fields remain unchanged.
 
-Lists are replaced as a whole, not merged by name. Non-empty structured `args`
-or `env` replace the corresponding raw list. Provider-derived values, such as
-Hugging Face backend arguments and pod identity labels, also win.
+Lists are replaced as a whole, except `containers`, `volumes`, `volumeMounts` and
+`imagePullSecrets`, whose items are merged by `name` (see
+[Custom containers](#custom-containers)). Non-empty structured `args` or `env`
+replace the corresponding raw list. Provider-derived values, such as Hugging Face
+backend arguments and pod identity labels, also win.
 
 The provider rejects malformed YAML, duplicate keys, and multiple documents.
 It validates the merged resource with a strict server-side dry-run apply before
@@ -733,8 +744,81 @@ Removing `config` removes its provider-owned fields on the next successful recon
 
 Unlike [LLM inline config](#advanced-customization-inline-config), predictor config
 is merged directly into the `InferenceService`; no separate config resource or
-`baseRefs` entry is created. `modelFormat` and `storageURI`, or a catalog `model`,
-are still required.
+`baseRefs` entry is created. `modelFormat` and `storageURI`, a catalog `model`, or an
+`image` are still required.
+
+### Custom containers
+
+Set `predictor.parameters.image` to serve a model with any server image instead of a KServe
+serving runtime: vLLM, Hugging Face Text Embeddings Inference (TEI), llama.cpp, SGLang,
+NVIDIA NIM, or your own. In the UI, turn on **Custom container**. The provider renders
+`spec.predictor.containers` with the image as KServe's `kserve-container`. Examples:
+[examples/instance-predictor-custom-container.yaml](examples/instance-predictor-custom-container.yaml)
+(TEI embeddings) and
+[examples/instance-predictor-custom-sidecar.yaml](examples/instance-predictor-custom-sidecar.yaml)
+(llama.cpp with a helper container).
+
+```yaml
+components:
+  predictor:
+    type: modelServer
+    resources:
+      limits: {cpu: "2", memory: 4Gi}
+    parameters:
+      image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+      args: [--model-id=sentence-transformers/all-MiniLM-L6-v2]
+      port: 80
+      healthPath: /health
+      openAICompatible: true
+```
+
+- `args`, `env`, `command`, the component resources and `gpuCount` apply to the image; GPU
+  pods get the same taint toleration and rollout strategy as runtime predictors.
+- Most servers download the model themselves (pass `HF_TOKEN` through `env` with
+  `valueFrom` for gated models). Alternatively set `storageURI`: KServe's storage initializer
+  downloads it to `/mnt/models` before the server starts.
+- Without `healthPath` the pod receives traffic as soon as the container starts, before a
+  large model has loaded.
+- `/dev/shm` is a memory-backed volume, which vLLM, PyTorch and Triton need.
+- Connection details point at the `<instance>-predictor` Service and report
+  `servedModelName` as `model`. With `openAICompatible`, `externalAccess: EnvoyAIGateway`
+  publishes the model on the [Envoy AI Gateway](#envoy-ai-gateway).
+- Metrics: the PodMonitor scrapes `/metrics` on `port`. Override with the
+  `prometheus.kserve.io/port` and `prometheus.kserve.io/path` `annotations`, or turn
+  `enableMetrics` off for servers without a Prometheus endpoint.
+
+For anything else, use [inline config](#predictor-inline-config) (**Advanced** in the UI).
+There, `containers`, `volumes`, `volumeMounts` and `imagePullSecrets` merge by `name`, so
+you can extend the generated container without restating it:
+
+- Add arguments, environment variables or volume mounts to `kserve-container`.
+- Add a helper container. One named `transformer-container` receives the Service traffic
+  (KServe's predictor/transformer collocation) and reaches the model server on `localhost`;
+  the external Service and the AI Gateway follow it. Other containers run as plain sidecars.
+- Add `volumes`, e.g. a PersistentVolumeClaim that caches model weights across restarts.
+
+```yaml
+config: |
+  predictor:
+    containers:
+      - name: kserve-container
+        args: [--max-model-len=4096]
+        volumeMounts:
+          - name: cache
+            mountPath: /root/.cache
+      - name: transformer-container
+        image: ghcr.io/example/shim:1
+        ports:
+          - containerPort: 3000
+    volumes:
+      - name: cache
+        persistentVolumeClaim:
+          claimName: model-cache
+```
+
+The image runs with the permissions of the Instance namespace, like any pod. Restrict what
+Instance authors may run with [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+or an admission policy on the namespace.
 
 ### Advanced customization (inline config)
 

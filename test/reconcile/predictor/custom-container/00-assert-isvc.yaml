@@ -1,0 +1,30 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: test-predictor-custom
+  annotations:
+    serving.kserve.io/deploymentMode: Standard
+    prometheus.kserve.io/port: "5678"
+    prometheus.kserve.io/path: /metrics
+spec:
+  predictor:
+    (model == null): true
+    (length(containers)): 2
+    (containers[0]):
+      name: kserve-container
+      image: hashicorp/http-echo:1.0
+      (args == ['-listen=:5678', '-text=model']): true
+      ports:
+        - containerPort: 5678
+      readinessProbe:
+        httpGet:
+          path: /
+          port: 5678
+      (volumeMounts[?name == 'dshm'] | length(@)): 1
+      (volumeMounts[?name == 'scratch'] | length(@)): 1
+    (containers[1]):
+      name: transformer-container
+      ports:
+        - containerPort: 3000
+    (volumes[?name == 'dshm'] | [0].emptyDir.medium): Memory
+    (volumes[?name == 'scratch'] | length(@)): 1

@@ -1,0 +1,38 @@
+# Example Instance CR for the provider-kserve provider: an embedding model
+# served by Hugging Face Text Embeddings Inference (TEI) as a custom container,
+# published on the Envoy AI Gateway.
+#
+# TEI downloads the model itself and serves the OpenAI API under /v1. Call it
+# with the URL and API key from the Instance's connection Secret:
+#   curl -X POST $URI/embeddings \
+#     -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+#     -d '{"model": "tei", "input": ["hello world"]}'
+#
+# Without the AI Gateway in the provider chart, drop the topology parameters
+# and call http://tei-predictor.<namespace>.svc.cluster.local/v1/embeddings.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: tei
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+    parameters:
+      externalAccess: EnvoyAIGateway
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      parameters:
+        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+        args: [--model-id=sentence-transformers/all-MiniLM-L6-v2]
+        port: 80
+        healthPath: /health
+        openAICompatible: true

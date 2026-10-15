@@ -48,17 +48,68 @@ func mergePredictorConfig(raw string, generated map[string]any) (map[string]any,
 	return config, nil
 }
 
-// mergeSpecMaps overlays generated fields in place; lists and scalars are atomic.
+// mergeSpecMaps overlays generated fields in place. Lists are atomic, except
+// those in namedLists, whose items are merged by name.
 func mergeSpecMaps(config, generated map[string]any) {
 	for key, value := range generated {
-		base, baseOK := config[key].(map[string]any)
-		override, overrideOK := value.(map[string]any)
-		if baseOK && overrideOK {
+		switch base := config[key].(type) {
+		case map[string]any:
+			if override, ok := value.(map[string]any); ok {
+				mergeSpecMaps(base, override)
+				continue
+			}
+		case []any:
+			if override, ok := value.([]any); ok && namedLists[key] {
+				config[key] = mergeNamedLists(base, override)
+				continue
+			}
+		}
+		config[key] = value
+	}
+}
+
+// namedLists lets config add sidecars, volumes and pull secrets next to a
+// custom container, and extend the generated container, without restating it.
+var namedLists = map[string]bool{
+	"containers":       true,
+	"volumes":          true,
+	"volumeMounts":     true,
+	"imagePullSecrets": true,
+}
+
+// mergeNamedLists merges generated items into the config item of the same
+// name, generated fields winning. Generated items come first: KServe treats
+// the first container as the model server.
+func mergeNamedLists(config, generated []any) []any {
+	out := make([]any, 0, len(config)+len(generated))
+	used := make([]bool, len(config))
+	for _, item := range generated {
+		override, _ := item.(map[string]any)
+		if i := indexByName(config, used, override["name"]); i >= 0 {
+			used[i] = true
+			base := config[i].(map[string]any)
 			mergeSpecMaps(base, override)
-		} else {
-			config[key] = value
+			item = base
+		}
+		out = append(out, item)
+	}
+	for i, item := range config {
+		if !used[i] {
+			out = append(out, item)
 		}
 	}
+	return out
+}
+
+func indexByName(items []any, used []bool, name any) int {
+	if name, _ := name.(string); name != "" {
+		for i, item := range items {
+			if m, ok := item.(map[string]any); ok && !used[i] && m["name"] == name {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // validatePredictorConfig runs the same apply as Sync without persisting it.

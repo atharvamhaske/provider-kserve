@@ -1,0 +1,61 @@
+# Example Instance CR for the provider-kserve provider: a model server plus a
+# helper container in the same pod (e.g. an API shim in front of vLLM).
+#
+# llama.cpp serves a small chat model on :8080. The helper, named
+# transformer-container, receives the Service traffic on :3000 and calls the
+# model server on localhost. Swap in your own server and helper images.
+#
+#   curl -X POST http://decider-predictor.<namespace>.svc.cluster.local/v1/decide \
+#     -H 'Content-Type: application/json' -d '{"question": "Is the sky blue?"}'
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: decider
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "4"
+          memory: 4Gi
+      parameters:
+        image: ghcr.io/ggml-org/llama.cpp:server
+        args: [-hf, Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M, --host, 0.0.0.0, --port, "8080"]
+        healthPath: /health
+        config: |
+          predictor:
+            containers:
+              - name: transformer-container
+                image: python:3.12-alpine
+                ports:
+                  - containerPort: 3000
+                command:
+                  - python
+                  - -c
+                  - |
+                    import json, urllib.request
+                    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+                    class Shim(BaseHTTPRequestHandler):
+                        def do_POST(self):
+                            question = json.loads(self.rfile.read(int(self.headers["Content-Length"])))["question"]
+                            request = urllib.request.Request(
+                                "http://localhost:8080/v1/chat/completions",
+                                json.dumps({"messages": [{"role": "user", "content": question}], "max_tokens": 32}).encode(),
+                                {"Content-Type": "application/json"},
+                            )
+                            answer = json.load(urllib.request.urlopen(request))["choices"][0]["message"]["content"]
+                            body = json.dumps({"decision": answer}).encode()
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(body)
+
+                    HTTPServer(("", 3000), Shim).serve_forever()
