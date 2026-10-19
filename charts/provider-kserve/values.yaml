@@ -615,7 +615,9 @@ envoy-gateway:
           fqdn:
             hostname: ai-gateway-controller
             port: 1063
-      # To enable per-key token quotas, add an existing Redis/Valkey endpoint:
+      # To enable per-key token quotas, add an existing Redis/Valkey endpoint
+      # (or redis.urlRef.secretKeyRef). A password-protected backend also needs
+      # REDIS_AUTH on the rate limit deployment; see the README.
       # rateLimit:
       #   backend:
       #     type: Redis
