@@ -979,6 +979,17 @@ spec:
                     message: Worker resources require Worker count
           description: Fixed replica count, or WVA autoscaling (KV-cache / queue-depth) via min/max. Autoscaling ignores Replicas. KServe minReplicas is ≥ 1 (no scale-to-zero).
           label: Scaling & Parallelism
+        scheduling:
+          components:
+            podSchedulingPolicy:
+              components:
+                policy:
+                  uiType: widget
+                  widgetType: podSchedulingPolicy
+              groupType: toggleable
+              label: Pod scheduling policy
+              uiType: group
+          label: Scheduling
       sectionsOrder:
         - basicInfo
         - scaling
@@ -987,6 +998,7 @@ spec:
         - routing
         - disaggregation
         - observability
+        - scheduling
         - advanced
     predictor:
       sections:

@@ -248,6 +248,10 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `maxReplicas` | int32 | Decode WVA autoscaling ceiling. Required when decode autoscaling is enabled. |
 | `scalingActuator` | string | WVA actuator: `keda` (default) or `hpa`. KEDA queries Prometheus directly; HPA needs a Prometheus Adapter. |
 
+`spec.components.llmEngine.schedulingPolicy` (scheduler name, node selector, affinity,
+tolerations, topology spread constraints) is applied to every model pod: decode, prefill and
+their workers.
+
 ### `predictor` (modelServer) parameters
 
 | Field | Type | Description |
@@ -878,9 +882,9 @@ replaces. With one replica this means a short outage per rollout. GPU `predictor
 the same through `deploymentStrategy`.
 
 GPU nodes are commonly tainted (`nvidia.com/gpu:NoSchedule`, set by the NVIDIA GPU Operator and
-many managed GPU node pools) so that only GPU workloads land on them. GPU `predictor` pods
-tolerate the taint named after each GPU resource they request, so they schedule there without
-extra settings; other tolerations come from `schedulingPolicy`.
+many managed GPU node pools) so that only GPU workloads land on them. GPU `llm` and `predictor`
+pods tolerate the taint named after each GPU resource they request, so they schedule there
+without extra settings; other tolerations come from `schedulingPolicy`.
 
 ### Observability
 
