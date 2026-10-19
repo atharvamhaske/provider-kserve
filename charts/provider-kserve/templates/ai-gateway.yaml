@@ -89,10 +89,7 @@ spec:
         namespaces:
           from: All
     {{- end }}
-{{- if .Values.aiGateway.auth.enabled }}
 ---
-# The provider renders the API key SecurityPolicy (<gateway>-api-keys). This
-# drops any client-supplied key ID header before authentication sets it.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
@@ -105,11 +102,19 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: {{ include "provider-kserve.aiGatewayName" . }}
+  # The AI Gateway buffers whole request and response bodies to read model
+  # names and token usage. Envoy's 32 KiB default rejects batched embeddings
+  # and long prompts with response_payload_too_large / request_payload_too_large.
+  connection:
+    bufferLimit: {{ required "aiGateway.bufferLimit is required" .Values.aiGateway.bufferLimit }}
+  {{- if .Values.aiGateway.auth.enabled }}
+  # The provider renders the API key SecurityPolicy (<gateway>-api-keys). This
+  # drops any client-supplied key ID header before authentication sets it.
   headers:
     earlyRequestHeaders:
       remove:
         - x-openeverest-key-id
-{{- end }}
+  {{- end }}
 {{- if (index .Values "envoy-gateway").enabled }}
 ---
 # The upstream AI Gateway chart grants InferencePool reads to the Envoy Gateway
