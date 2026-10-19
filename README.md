@@ -499,7 +499,7 @@ Token metering is always configured on AI routes. Global quota enforcement also 
 existing Redis-compatible service. Configure its address in the Envoy Gateway subchart values:
 
 ```yaml
-envoyGateway:
+envoy-gateway:
   config:
     envoyGateway:
       rateLimit:
@@ -509,7 +509,39 @@ envoyGateway:
             url: valkey.default.svc.cluster.local:6379
 ```
 
-When the URL is omitted, no `BackendTrafficPolicy` is created. When configured, the quota is
+The rate limit service connects to that single endpoint, so it must accept writes on every
+connection. With a `provider-valkey` Instance of the `replication` topology, use its
+`valkey-<instance>-primary` Service and turn TLS off for it: Envoy Gateway's Redis TLS settings
+only carry a client certificate, not the private CA `provider-valkey` issues its server
+certificates from. The URL can also come from a Secret in the release
+namespace with `redis.urlRef.secretKeyRef` instead of `redis.url`.
+
+A password-protected backend (every `provider-valkey` Instance is) needs the password in a
+Secret in the release namespace, passed to the rate limit service as `REDIS_AUTH`
+(`<password>`, or `<user>:<password>` for an ACL user):
+
+```yaml
+envoy-gateway:
+  config:
+    envoyGateway:
+      provider:
+        kubernetes:
+          rateLimitDeployment:
+            container:
+              env:
+                - name: REDIS_AUTH
+                  valueFrom:
+                    secretKeyRef:
+                      name: ai-gateway-ratelimit-redis
+                      key: password
+```
+
+```bash
+kubectl -n <release-namespace> create secret generic ai-gateway-ratelimit-redis \
+  --from-literal=password="$(kubectl -n <ns> get secret <instance>-conn -o jsonpath='{.data.password}' | base64 -d)"
+```
+
+When no backend is configured, no `BackendTrafficPolicy` is created. When configured, the quota is
 keyed by both the API key ID and model (by the client-supplied `x-user-id` when
 `aiGateway.auth.enabled=false`), request cost is zero, and the response's
 `llm_total_token` metadata is charged. Exhausted quotas return HTTP 429. Gateway TLS does not
