@@ -15,6 +15,7 @@ import (
 
 	kservev1alpha2 "github.com/kserve/kserve/pkg/apis/serving/v1alpha2"
 
+	commonv1alpha1 "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
@@ -712,6 +713,96 @@ func TestBuildLLMInferenceServiceGPULibraryPath(t *testing.T) {
 		}
 		if got.Spec.Prefill.Worker == nil || !hasLibraryPath(got.Spec.Prefill.Worker.Containers[0]) {
 			t.Fatalf("prefill worker missing LIBRARY_PATH: %#v", got.Spec.Prefill.Worker)
+		}
+	})
+}
+
+func TestBuildLLMInferenceServiceScheduling(t *testing.T) {
+	t.Parallel()
+	gpuTaint := corev1.Toleration{Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}
+	userToleration := corev1.Toleration{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "llm", Effect: corev1.TaintEffectNoSchedule}
+	nodeSelector := map[string]string{"pool": "gpu"}
+	withPolicy := func(c *controller.Context, policy *commonv1alpha1.SchedulingPolicy) *controller.Context {
+		comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
+		comp.SchedulingPolicy = policy
+		c.Instance().Spec.Components[common.ComponentLlmEngine] = comp
+		return c
+	}
+	allPods := func(got *kservev1alpha2.LLMInferenceService) map[string]*corev1.PodSpec {
+		pods := map[string]*corev1.PodSpec{"template": got.Spec.Template, "worker": got.Spec.Worker}
+		if got.Spec.Prefill != nil {
+			pods["prefill"] = got.Spec.Prefill.Template
+			pods["prefill worker"] = got.Spec.Prefill.Worker
+		}
+		return pods
+	}
+	multiNode := components.VllmCustomSpec{WorkerCount: ptr.To(int32(1)), PipelineParallelSize: ptr.To(int32(2))}
+	prefillWorkers := llm.LlmTopologyParameters{EnablePrefill: true, PrefillWorkerCount: ptr.To(int32(1)), PrefillPipelineParallelSize: ptr.To(int32(2))}
+
+	t.Run("GPU pods tolerate the GPU taint", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, multiNode, prefillWorkers))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, pod := range allPods(got) {
+			if pod == nil || !slices.Equal(pod.Tolerations, []corev1.Toleration{gpuTaint}) {
+				t.Fatalf("%s tolerations = %#v, want [%v]", name, pod, gpuTaint)
+			}
+		}
+	})
+
+	t.Run("CPU profile adds no GPU toleration", func(t *testing.T) {
+		t.Parallel()
+		got, err := buildLLMInferenceService(llmContext(t, nil, components.VllmCustomSpec{ComputeProfile: "cpu"}, llm.LlmTopologyParameters{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template != nil && len(got.Spec.Template.Tolerations) > 0 {
+			t.Fatalf("tolerations = %#v, want none", got.Spec.Template.Tolerations)
+		}
+	})
+
+	t.Run("schedulingPolicy reaches every pod and keeps user tolerations", func(t *testing.T) {
+		t.Parallel()
+		affinity := &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "gpu", Operator: corev1.NodeSelectorOpExists}},
+			}}},
+		}}
+		c := withPolicy(llmContext(t, nil, multiNode, prefillWorkers), &commonv1alpha1.SchedulingPolicy{
+			SchedulerName: "custom",
+			NodeSelector:  nodeSelector,
+			Affinity:      affinity,
+			Tolerations:   []corev1.Toleration{userToleration},
+		})
+		got, err := buildLLMInferenceService(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, pod := range allPods(got) {
+			if pod == nil {
+				t.Fatalf("%s pod spec is nil", name)
+			}
+			if pod.SchedulerName != "custom" || !maps.Equal(pod.NodeSelector, nodeSelector) || pod.Affinity != affinity {
+				t.Fatalf("%s placement = scheduler %q, nodeSelector %v, affinity %v", name, pod.SchedulerName, pod.NodeSelector, pod.Affinity)
+			}
+			if !slices.Equal(pod.Tolerations, []corev1.Toleration{userToleration, gpuTaint}) {
+				t.Fatalf("%s tolerations = %#v", name, pod.Tolerations)
+			}
+		}
+	})
+
+	t.Run("CPU profile honours schedulingPolicy", func(t *testing.T) {
+		t.Parallel()
+		c := withPolicy(llmContext(t, nil, components.VllmCustomSpec{ComputeProfile: "cpu"}, llm.LlmTopologyParameters{}),
+			&commonv1alpha1.SchedulingPolicy{NodeSelector: nodeSelector})
+		got, err := buildLLMInferenceService(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Template == nil || !maps.Equal(got.Spec.Template.NodeSelector, nodeSelector) || len(got.Spec.Template.Tolerations) > 0 {
+			t.Fatalf("template = %#v", got.Spec.Template)
 		}
 	})
 }

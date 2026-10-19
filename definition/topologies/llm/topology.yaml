@@ -564,6 +564,17 @@ ui:
       - enableMetrics
       - enableTracing
       - tracingEndpoint
+    scheduling:
+      label: Scheduling
+      components:
+        podSchedulingPolicy:
+          uiType: group
+          groupType: toggleable
+          label: Pod scheduling policy
+          components:
+            policy:
+              uiType: widget
+              widgetType: podSchedulingPolicy
     advanced:
       label: Advanced
       description: >-
@@ -598,4 +609,5 @@ ui:
   - routing
   - disaggregation
   - observability
+  - scheduling
   - advanced

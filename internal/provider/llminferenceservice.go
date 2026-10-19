@@ -14,6 +14,7 @@ import (
 
 	kservev1alpha2 "github.com/kserve/kserve/pkg/apis/serving/v1alpha2"
 
+	commonv1alpha1 "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
 	"github.com/openeverest/provider-kserve/definition/components"
@@ -671,7 +672,9 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 	}
 
 	if params.WorkerCount != nil {
-		spec.Worker = buildWorkerPodSpec(overlayResources(effRes, params.WorkerResources), !isCPUProfile)
+		workerRes := overlayResources(effRes, params.WorkerResources)
+		spec.Worker = buildWorkerPodSpec(workerRes, !isCPUProfile)
+		applyLLMScheduling(spec.Worker, comp.SchedulingPolicy, spec.Labels, workerRes)
 	}
 
 	// Optional pod resource requirements from the component spec. KServe
@@ -720,6 +723,13 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 			spec.Template = &corev1.PodSpec{}
 		}
 		spec.Template.ServiceAccountName = modelPullerSAName(c.Name())
+	}
+
+	if comp.SchedulingPolicy != nil || requestsGPU(effRes) {
+		if spec.Template == nil {
+			spec.Template = &corev1.PodSpec{}
+		}
+		applyLLMScheduling(spec.Template, comp.SchedulingPolicy, spec.Labels, effRes)
 	}
 
 	// Config inheritance. The CPU compute profile composes the bundled CPU-only
@@ -794,8 +804,16 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 				Containers: []corev1.Container{prefillMain},
 			}
 		}
+		if comp.SchedulingPolicy != nil || requestsGPU(effRes) {
+			if prefill.Template == nil {
+				prefill.Template = &corev1.PodSpec{}
+			}
+			applyLLMScheduling(prefill.Template, comp.SchedulingPolicy, prefill.Labels, effRes)
+		}
 		if topo.PrefillWorkerCount != nil {
-			prefill.Worker = buildWorkerPodSpec(overlayResources(effRes, topo.PrefillWorkerResources), !isCPUProfile)
+			workerRes := overlayResources(effRes, topo.PrefillWorkerResources)
+			prefill.Worker = buildWorkerPodSpec(workerRes, !isCPUProfile)
+			applyLLMScheduling(prefill.Worker, comp.SchedulingPolicy, prefill.Labels, workerRes)
 		}
 		spec.Prefill = prefill
 	}
@@ -831,6 +849,22 @@ func gpuRolloutStrategy() *kservev1alpha2.RolloutStrategy {
 	return &kservev1alpha2.RolloutStrategy{
 		MaxSurge:       ptr.To(intstr.FromInt32(0)),
 		MaxUnavailable: ptr.To(intstr.FromInt32(1)),
+	}
+}
+
+// applyLLMScheduling places one LLM pod template the way predictor pods are
+// placed: the component's schedulingPolicy, plus a toleration for the taint
+// named after each GPU resource the pod requests.
+func applyLLMScheduling(pod *corev1.PodSpec, policy *commonv1alpha1.SchedulingPolicy, podLabels map[string]string, res *corev1.ResourceRequirements) {
+	if policy != nil {
+		pod.SchedulerName = policy.SchedulerName
+		pod.NodeSelector = policy.NodeSelector
+		pod.Affinity = policy.Affinity
+		pod.Tolerations = policy.Tolerations
+		pod.TopologySpreadConstraints = controller.TopologySpreadConstraints(policy, podLabels)
+	}
+	if requestsGPU(res) {
+		pod.Tolerations = withGPUTolerations(pod.Tolerations, res)
 	}
 }
 
