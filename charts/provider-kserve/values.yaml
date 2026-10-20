@@ -571,6 +571,10 @@ aiGateway:
   gatewayService:
     # -- Envoy proxy Service type (LoadBalancer, NodePort, or ClusterIP)
     type: LoadBalancer
+  # -- Largest request or response body the Gateway buffers. The AI Gateway
+  # reads whole bodies (model name, token usage), so this caps prompt and
+  # completion size and embedding batch size.
+  bufferLimit: 50Mi
   auth:
     # -- Require an API key on every request through the shared Gateway. Each
     # llm Instance gets a generated key in its connection details (password).
