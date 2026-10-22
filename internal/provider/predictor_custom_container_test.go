@@ -176,6 +176,26 @@ func TestValidateCustomContainer(t *testing.T) {
 			params:  components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", OpenAICompatible: true},
 			wantErr: "parameters.openAICompatible requires image",
 		},
+		{
+			name:    "apiSchema without image",
+			params:  components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", APISchema: "TypeSafe"},
+			wantErr: "parameters.apiSchema requires image",
+		},
+		{
+			name:    "backendAPIKeySecret without image",
+			params:  components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris", BackendAPIKeySecret: "key"},
+			wantErr: "parameters.backendAPIKeySecret requires image",
+		},
+		{name: "apiSchema TypeSafe", params: components.ModelServerCustomSpec{Image: image, APISchema: "TypeSafe"}},
+		{name: "apiSchema OpenAI with openAICompatible", params: components.ModelServerCustomSpec{Image: image, APISchema: "OpenAI", OpenAICompatible: true}},
+		{name: "unknown apiSchema", params: components.ModelServerCustomSpec{Image: image, APISchema: "Anthropic"}, wantErr: "apiSchema must be OpenAI or TypeSafe"},
+		{
+			name:    "TypeSafe with openAICompatible",
+			params:  components.ModelServerCustomSpec{Image: image, APISchema: "TypeSafe", OpenAICompatible: true},
+			wantErr: "openAICompatible conflicts with apiSchema",
+		},
+		{name: "invalid backend key secret", params: components.ModelServerCustomSpec{Image: image, BackendAPIKeySecret: "Bad_Name"}, wantErr: "parameters.backendAPIKeySecret:"},
+		{name: "backend key secret without the gateway", params: components.ModelServerCustomSpec{Image: image, BackendAPIKeySecret: "key"}, wantErr: "requires topology.parameters.externalAccess EnvoyAIGateway"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,21 +214,38 @@ func TestValidateCustomContainer(t *testing.T) {
 	}
 }
 
-func TestPredictorOpenAIPrefix(t *testing.T) {
+func TestPredictorGatewaySchema(t *testing.T) {
 	cases := []struct {
-		name   string
-		params components.ModelServerCustomSpec
-		want   string
+		name     string
+		params   components.ModelServerCustomSpec
+		want     map[string]any
+		wantBase string
 	}{
-		{name: "huggingface embeddings", params: components.ModelServerCustomSpec{ModelFormat: "huggingface", Task: "text_embedding"}, want: "/openai/v1"},
+		{name: "huggingface embeddings", params: components.ModelServerCustomSpec{ModelFormat: "huggingface", Task: "text_embedding"},
+			want: map[string]any{"name": "OpenAI", "prefix": "/openai/v1"}, wantBase: "/v1"},
 		{name: "other runtime", params: components.ModelServerCustomSpec{ModelFormat: "sklearn"}},
-		{name: "OpenAI-compatible image", params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", OpenAICompatible: true}, want: "/v1"},
+		{name: "OpenAI-compatible image", params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", OpenAICompatible: true},
+			want: map[string]any{"name": "OpenAI", "prefix": "/v1"}, wantBase: "/v1"},
+		{name: "apiSchema OpenAI", params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", APISchema: "OpenAI"},
+			want: map[string]any{"name": "OpenAI", "prefix": "/v1"}, wantBase: "/v1"},
+		{name: "apiSchema TypeSafe", params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", APISchema: "TypeSafe"},
+			want: map[string]any{"name": "TypeSafe", "version": "v1"}, wantBase: "/typesafe"},
 		{name: "other image", params: components.ModelServerCustomSpec{Image: "ghcr.io/example/server:1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := predictorOpenAIPrefix(tc.params); got != tc.want {
-				t.Fatalf("predictorOpenAIPrefix = %q, want %q", got, tc.want)
+			got, ok := predictorGatewaySchema(tc.params)
+			if ok != (tc.want != nil) {
+				t.Fatalf("predictorGatewaySchema ok = %v, want %v", ok, tc.want != nil)
+			}
+			if !ok {
+				return
+			}
+			if !reflect.DeepEqual(got.spec(), tc.want) {
+				t.Fatalf("schema = %#v, want %#v", got.spec(), tc.want)
+			}
+			if got.clientBasePath() != tc.wantBase {
+				t.Fatalf("clientBasePath = %q, want %q", got.clientBasePath(), tc.wantBase)
 			}
 		})
 	}

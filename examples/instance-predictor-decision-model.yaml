@@ -1,0 +1,107 @@
+# Example Instance CR for the provider-kserve provider: a decision model that
+# serves the TypeSafe System One API, published on the Envoy AI Gateway.
+#
+# OpenJev Flash 9B (FP8) runs in vLLM on one GPU (kserve-container, :8080).
+# OpenJev's decision helper (transformer-container, :3000) receives the
+# traffic, turns POST /v1/systemone into letter readouts against vLLM on
+# localhost, and returns typed answers with calibrated probabilities. The
+# Gateway publishes it under /typesafe with the Instance's API key.
+#
+# Prerequisites:
+#   - provider chart with aiGateway.enabled (and Envoy Gateway / AI Gateway v1.2+)
+#   - a GPU with 20 GB or more (e.g. RTX 4000 Ada, L4, A10, A100, H100)
+#   - the helper's own key, shared by the helper and the Gateway:
+#       kubectl create secret generic openjev-helper --from-literal=apiKey="$(openssl rand -hex 24)"
+#
+# Call it with the URL and API key from the Instance's connection Secret:
+#   curl -X POST $URI/v1/systemone \
+#     -H "Authorization: Bearer $PASSWORD" -H 'Content-Type: application/json' \
+#     -d '{"model": "openjev", "state": "I was charged twice.",
+#          "questions": {"route": {"type": "choice", "instructions": "Which team?",
+#                                  "criteria": {"billing": null, "shipping": null}}}}'
+#
+# OpenJev weights are CC BY-NC 4.0 (non-commercial); the helper is Apache 2.0.
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: openjev
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: predictor
+    parameters:
+      externalAccess: EnvoyAIGateway
+  components:
+    predictor:
+      type: modelServer
+      replicas: 1
+      resources:
+        limits:
+          cpu: "5"
+          memory: 20Gi
+      parameters:
+        image: vllm/vllm-openai:v0.29.0
+        command: [vllm, serve]
+        args:
+          - openjev/OpenJev-Flash-9B-FP8
+          - --host=0.0.0.0
+          - --port=8080
+          - --served-model-name=qwen          # the helper calls the model by this name
+          - --enable-prefix-caching
+          - --max-model-len=16384
+          - --gpu-memory-utilization=0.90
+          - --limit-mm-per-prompt={"image":1}
+          - --trust-remote-code
+          - --max-num-seqs=16
+          - --max-logprobs=64                 # the helper reads up to 52 option scores
+          - --gdn-prefill-backend=triton
+          - --quantization=fp8
+        port: 8080
+        healthPath: /health
+        gpuCount: 1
+        apiSchema: TypeSafe
+        backendAPIKeySecret: openjev-helper
+        config: |
+          predictor:
+            containers:
+              - name: transformer-container
+                # Same image as the model server: it has python, openai and transformers.
+                image: vllm/vllm-openai:v0.29.0
+                command: [sh, -c]
+                args:
+                  - |
+                    set -e
+                    python3 - <<'EOF'
+                    import hashlib, urllib.request
+                    url = ("https://huggingface.co/openjev/OpenJev-Flash-9B/resolve/"
+                           "b77b0fff67c77a76c16d4da50a66d2fdbc124fae/helper/shim.py")
+                    data = urllib.request.urlopen(url, timeout=60).read()
+                    digest = hashlib.sha256(data).hexdigest()
+                    assert digest == "81a22f1b1b8912a465059207ef9f60b7c6c16b4de6372305d867efbe38a1987a", digest
+                    open("/tmp/shim.py", "wb").write(data)
+                    EOF
+                    exec python3 /tmp/shim.py --host 0.0.0.0 --port 3000
+                ports:
+                  - containerPort: 3000
+                    protocol: TCP
+                env:
+                  # The calibration published for OpenJev Flash 9B.
+                  - {name: VLLM, value: "http://127.0.0.1:8080/v1"}
+                  - {name: TOKENIZER, value: openjev/OpenJev-Flash-9B-FP8}
+                  - {name: READOUT_T, value: "1.07"}
+                  - {name: READOUT_NOUL_T, value: "1.074766"}
+                  - {name: READOUT_NOUL_BIAS, value: "0"}
+                  - {name: READOUT_TARGETED, value: "1"}
+                  - {name: READOUT_INSTR_STYLE, value: pyrepr}
+                  - {name: SHIM_STAGGER, value: "1"}
+                  - name: SHIM_TOKEN
+                    valueFrom:
+                      secretKeyRef: {name: openjev-helper, key: apiKey}
+                readinessProbe:
+                  tcpSocket: {port: 3000}
+                  periodSeconds: 5
+                resources:
+                  requests: {cpu: "1", memory: 2Gi}
+                  limits: {cpu: "1", memory: 2Gi}

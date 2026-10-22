@@ -124,10 +124,14 @@ spec:
               additionalProperties:
                 type: string
               type: object
+            apiSchema:
+              type: string
             args:
               items:
                 type: string
               type: array
+            backendAPIKeySecret:
+              type: string
             command:
               items:
                 type: string
@@ -1026,6 +1030,28 @@ spec:
           components:
             customContainer:
               components:
+                apiSchema:
+                  fieldParams:
+                    displayEmpty: true
+                    helperText: The API the image serves. Required to publish the container on the Envoy AI Gateway.
+                    label: API for the Envoy AI Gateway
+                    options:
+                      - label: OpenAI (under /v1)
+                        value: OpenAI
+                      - label: TypeSafe System One (POST /v1/systemone)
+                        value: TypeSafe
+                  path: spec.components.predictor.parameters.apiSchema
+                  uiType: select
+                backendAPIKeySecret:
+                  fieldParams:
+                    helperText: Secret in the Instance namespace whose apiKey entry the Envoy AI Gateway sends to the image as a bearer token. Only with Envoy AI Gateway.
+                    label: Backend API key secret
+                  path: spec.components.predictor.parameters.backendAPIKeySecret
+                  uiType: text
+                  validation:
+                    celExpressions:
+                      - celExpr: '!has(spec.components.predictor.parameters.backendAPIKeySecret) || spec.topology.parameters.externalAccess == "EnvoyAIGateway"'
+                        message: Backend API key secret requires External access = Envoy AI Gateway
                 healthPath:
                   fieldParams:
                     helperText: Returns 200 once the model is loaded; the pod gets no traffic before that. Empty sends traffic as soon as the container starts.
@@ -1050,12 +1076,6 @@ spec:
                     label: Image pull secret
                   path: spec.components.predictor.parameters.imagePullSecret
                   uiType: text
-                openAICompatible:
-                  fieldParams:
-                    helperText: Allows the Envoy AI Gateway.
-                    label: OpenAI-compatible API under /v1
-                  path: spec.components.predictor.parameters.openAICompatible
-                  uiType: toggle
                 port:
                   fieldParams:
                     helperText: HTTP port the image listens on.
@@ -1077,8 +1097,9 @@ spec:
                 - image
                 - port
                 - healthPath
-                - openAICompatible
+                - apiSchema
                 - servedModelName
+                - backendAPIKeySecret
                 - imagePullSecret
               description: Serve the model with your own image (e.g. vLLM, Text Embeddings Inference, llama.cpp, NVIDIA NIM) instead of a KServe serving runtime. Add arguments, environment variables, volumes or a helper container under Advanced.
               groupType: toggleable
@@ -1253,7 +1274,7 @@ spec:
             externalAccess:
               fieldParams:
                 defaultValue: ClusterIP
-                helperText: Envoy AI Gateway serves text embedding models and OpenAI-compatible custom containers.
+                helperText: Envoy AI Gateway serves text embedding models and custom containers that serve the OpenAI or TypeSafe API.
                 label: External access
                 options:
                   - label: ClusterIP
@@ -1280,7 +1301,7 @@ spec:
           componentsOrder:
             - externalAccess
             - tokenLimitPerHour
-          description: How clients reach the model. ClusterIP stays in-cluster; LoadBalancer and NodePort create a Service in front of the predictor pods; Envoy AI Gateway publishes an embedding model or an OpenAI-compatible custom container on the shared Gateway, with an API key.
+          description: How clients reach the model. ClusterIP stays in-cluster; LoadBalancer and NodePort create a Service in front of the predictor pods; Envoy AI Gateway publishes an embedding model or a custom container that serves the OpenAI or TypeSafe API on the shared Gateway, with an API key.
           label: Routing
         runtime:
           components:

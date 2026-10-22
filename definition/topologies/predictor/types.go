@@ -28,9 +28,9 @@ const (
 // InferenceService.
 type PredictorTopologyParameters struct {
 	// ExternalAccess is the client access path: ClusterIP, LoadBalancer,
-	// NodePort, or EnvoyAIGateway (OpenAI-compatible predictors only, through
-	// the provider's shared Gateway). When set it takes precedence over
-	// predictor.service.serviceType.
+	// NodePort, or EnvoyAIGateway (embedding models and custom containers
+	// that serve the OpenAI or TypeSafe API, through the provider's shared
+	// Gateway). When set it takes precedence over predictor.service.serviceType.
 	ExternalAccess string `json:"externalAccess,omitempty"`
 
 	// TokenLimitPerHour is the per-API-key token quota for this model through
