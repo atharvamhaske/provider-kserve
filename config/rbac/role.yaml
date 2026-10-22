@@ -45,6 +45,7 @@ rules:
   resources:
   - aigatewayroutes
   - aiservicebackends
+  - backendsecuritypolicies
   verbs:
   - create
   - delete

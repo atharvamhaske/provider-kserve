@@ -1052,7 +1052,7 @@ func (p *Provider) statusLLM(c *controller.Context) (controller.Status, error) {
 			comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
 			var params components.VllmCustomSpec
 			c.TryDecodeComponentParameters(comp, &params)
-			details, waiting, err := aiGatewayConnectionDetails(c, servedModelName(c.Name(), params.ModelName))
+			details, waiting, err := aiGatewayConnectionDetails(c, servedModelName(c.Name(), params.ModelName), openAIBasePath)
 			if err != nil {
 				return controller.Status{}, err
 			}

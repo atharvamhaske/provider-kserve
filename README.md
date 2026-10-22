@@ -278,7 +278,9 @@ their workers.
 | `command` | []string | Overrides the image entrypoint. Requires `image`. |
 | `port` | int32 | HTTP port the image listens on (default 8080). Requires `image`. |
 | `healthPath` | string | HTTP path that returns 200 once the model is loaded (readiness probe). Requires `image`. |
-| `openAICompatible` | bool | The image serves the OpenAI API under `/v1`; allows the Envoy AI Gateway. Requires `image`. |
+| `openAICompatible` | bool | The image serves the OpenAI API under `/v1`; allows the Envoy AI Gateway. Shorthand for `apiSchema: OpenAI`. Requires `image`. |
+| `apiSchema` | string | The API the image serves, which allows the Envoy AI Gateway: `OpenAI` (under `/v1`) or `TypeSafe` (the System One decision API, `POST /v1/systemone`). See [Decision models](#decision-models-typesafe-system-one). Requires `image`. |
+| `backendAPIKeySecret` | string | Secret in the Instance namespace whose `apiKey` entry the Envoy AI Gateway sends to the image as a bearer token, for images that require their own key. Requires `image` and `externalAccess: EnvoyAIGateway`. |
 | `servedModelName` | string | Model name the image expects in requests; reported as `model` in the connection details. Requires `image`. |
 | `imagePullSecret` | string | Secret for pulling `image` from a private registry. Requires `image`. |
 
@@ -292,7 +294,7 @@ tolerations, topology spread constraints) is applied to the predictor pods.
 
 | Field | Type | Description |
 |---|---|---|
-| `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, `NodePort`, or `EnvoyAIGateway` (embedding models and OpenAI-compatible custom containers). Takes precedence over `predictor.service.serviceType`. |
+| `externalAccess` | string | `ClusterIP` (default), `LoadBalancer`, `NodePort`, or `EnvoyAIGateway` (embedding models and custom containers with an `apiSchema`). Takes precedence over `predictor.service.serviceType`. |
 | `tokenLimitPerHour` | int32 | Per-API-key hourly token quota. Only valid with Envoy AI Gateway. Defaults to 1000 when a Redis/Valkey rate-limit backend is configured. |
 | `enableMetrics` | bool | Emit a PodMonitor for the predictor pods. Defaults to enabled. |
 
@@ -463,9 +465,12 @@ the same `externalAccess` and `tokenLimitPerHour` parameters. They have no `Infe
 the route points at an `AIServiceBackend` and an Envoy Gateway `Backend` (both
 `<instance>-ai-gateway`) for the runtime's `/openai/v1` API on the `<instance>-predictor`
 Service. The model is served under the Instance name, which must therefore be unique across
-the Gateway. [Custom containers](#custom-containers) with `openAICompatible: true` use the
-Gateway the same way, for their `/v1` API; when `servedModelName` is set the Gateway rewrites
-the Instance name to it. Other predictor models have no OpenAI-compatible API and are rejected.
+the Gateway. [Custom containers](#custom-containers) with `apiSchema: OpenAI` (or
+`openAICompatible: true`) use the Gateway the same way, for their `/v1` API; when
+`servedModelName` is set the Gateway rewrites the Instance name to it. Custom containers with
+`apiSchema: TypeSafe` are published under `/typesafe` instead (see
+[Decision models](#decision-models-typesafe-system-one)). Other predictor models have no API the
+Gateway can route and are rejected.
 
 ```bash
 curl "$GATEWAY_URL/v1/embeddings" \
@@ -550,6 +555,61 @@ keyed by both the API key ID and model (by the client-supplied `x-user-id` when
 `aiGateway.auth.enabled=false`), request cost is zero, and the response's
 `llm_total_token` metadata is charged. Exhausted quotas return HTTP 429. Gateway TLS does not
 add backend TLS; configure that separately if traffic to the model pods must be encrypted.
+
+#### Decision models (TypeSafe System One)
+
+Decision models such as [OpenJev](https://huggingface.co/openjev/openjev) answer typed
+questions (`choice`, yes/no `noul`, `score`) with a probability per option, through the
+TypeSafe System One API (`POST /v1/systemone`) rather than the OpenAI API. Envoy AI Gateway
+(v1.2+) routes that API natively, so a custom container that serves it can be published with
+`apiSchema: TypeSafe`:
+
+```yaml
+spec:
+  topology:
+    type: predictor
+    parameters:
+      externalAccess: EnvoyAIGateway
+  components:
+    predictor:
+      type: modelServer
+      parameters:
+        image: vllm/vllm-openai:v0.29.0
+        apiSchema: TypeSafe
+        backendAPIKeySecret: openjev-helper   # optional: the image's own key
+        # ... the model server, plus the decision helper as transformer-container
+```
+
+The provider creates the same `<instance>-ai-gateway` route and backends as for an OpenAI
+image, with an `AIServiceBackend` of schema `TypeSafe`. Clients call
+`$GATEWAY_URL/typesafe/v1/systemone` with the Instance name as `model` and the Instance's API
+key; the Gateway forwards to `/v1/systemone` on the predictor. The connection details carry
+`<gateway>/typesafe` as the base URL, ready for a TypeSafe client:
+
+```bash
+curl "$GATEWAY_URL/typesafe/v1/systemone" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{
+    "model": "openjev",
+    "state": "Customer message: I was charged twice for my order last week.",
+    "questions": {
+      "route": {"type": "choice", "instructions": "Which team should handle this?",
+                "criteria": {"billing": null, "shipping": null, "technical": null}}
+    }
+  }'
+```
+
+API keys, per-model authorization and token quotas work as for OpenAI models: the Gateway
+reads the model from the request body and meters the response's `usage.input_tokens`.
+
+The Gateway strips the client's key before forwarding. If the image requires its own key (the
+OpenJev helper does when `SHIM_TOKEN` is set), put it under `apiKey` in a Secret in the Instance
+namespace and set `backendAPIKeySecret`: the provider adds a `BackendSecurityPolicy` that sends
+it to the image as a bearer token. The same works for OpenAI images started with an API key
+(e.g. vLLM's `--api-key`). See
+[examples/instance-predictor-decision-model.yaml](examples/instance-predictor-decision-model.yaml)
+for OpenJev served by vLLM with its decision helper.
 
 ### Model catalog
 
@@ -817,8 +877,10 @@ components:
   large model has loaded.
 - `/dev/shm` is a memory-backed volume, which vLLM, PyTorch and Triton need.
 - Connection details point at the `<instance>-predictor` Service and report
-  `servedModelName` as `model`. With `openAICompatible`, `externalAccess: EnvoyAIGateway`
-  publishes the model on the [Envoy AI Gateway](#envoy-ai-gateway).
+  `servedModelName` as `model`. With `openAICompatible` (or `apiSchema: OpenAI`),
+  `externalAccess: EnvoyAIGateway` publishes the model on the
+  [Envoy AI Gateway](#envoy-ai-gateway); with `apiSchema: TypeSafe`, a
+  [decision model](#decision-models-typesafe-system-one) is published the same way.
 - Metrics: the PodMonitor scrapes `/metrics` on `port`. Override with the
   `prometheus.kserve.io/port` and `prometheus.kserve.io/path` `annotations`, or turn
   `enableMetrics` off for servers without a Prometheus endpoint.

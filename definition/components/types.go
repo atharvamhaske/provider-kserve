@@ -265,8 +265,21 @@ type ModelServerCustomSpec struct {
 	HealthPath string `json:"healthPath,omitempty"`
 
 	// OpenAICompatible marks an image that serves the OpenAI API under /v1,
-	// which makes it eligible for the Envoy AI Gateway. Requires image.
+	// which makes it eligible for the Envoy AI Gateway. Shorthand for
+	// apiSchema OpenAI. Requires image.
 	OpenAICompatible bool `json:"openAICompatible,omitempty"`
+
+	// APISchema is the API the image serves, which makes it eligible for the
+	// Envoy AI Gateway: OpenAI (under /v1) or TypeSafe (the System One
+	// decision API, POST /v1/systemone, served e.g. by OpenJev). Requires
+	// image.
+	APISchema string `json:"apiSchema,omitempty"`
+
+	// BackendAPIKeySecret names a Secret in the Instance namespace whose
+	// apiKey entry the Envoy AI Gateway sends to the image as a bearer token,
+	// for images that require their own API key. Requires image and
+	// externalAccess EnvoyAIGateway.
+	BackendAPIKeySecret string `json:"backendAPIKeySecret,omitempty"`
 
 	// ServedModelName is the model name the image expects in requests. The
 	// connection details report it, and the AI Gateway rewrites the Instance
@@ -281,6 +294,24 @@ type ModelServerCustomSpec struct {
 // CustomContainerDefaultPort is the port a custom image is expected to listen
 // on when port is unset; KServe runtimes use the same.
 const CustomContainerDefaultPort int32 = 8080
+
+// API schemas a custom image can serve to the Envoy AI Gateway.
+const (
+	APISchemaOpenAI   = "OpenAI"
+	APISchemaTypeSafe = "TypeSafe"
+)
+
+// ResolvedAPISchema is the API the custom image serves: apiSchema, or OpenAI
+// when only openAICompatible is set. Empty means none the gateway can route.
+func (s ModelServerCustomSpec) ResolvedAPISchema() string {
+	if s.APISchema != "" {
+		return s.APISchema
+	}
+	if s.OpenAICompatible {
+		return APISchemaOpenAI
+	}
+	return ""
+}
 
 // UsesCustomContainer reports whether the predictor runs a user image instead
 // of a KServe serving runtime.

@@ -209,13 +209,15 @@ func validatePredictor(c *controller.Context) error {
 		if !common.AIGatewayEnabled() {
 			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway requires aiGateway.enabled in the provider chart")
 		}
-		if predictorOpenAIPrefix(params) == "" {
-			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway needs an OpenAI-compatible predictor: "+
-				"modelFormat %q with task %q, or an image with openAICompatible", huggingFaceModelFormat, textEmbeddingTask)
+		if _, ok := predictorGatewaySchema(params); !ok {
+			return fmt.Errorf("topology.parameters.externalAccess EnvoyAIGateway needs a predictor that serves an API the gateway routes: "+
+				"modelFormat %q with task %q, or an image with apiSchema (or openAICompatible)", huggingFaceModelFormat, textEmbeddingTask)
 		}
 		if err := validateAIGatewayAccess(c, c.Name(), "the predictor serves the model under the Instance name, so use another Instance name"); err != nil {
 			return err
 		}
+	} else if params.BackendAPIKeySecret != "" {
+		return fmt.Errorf("%s.parameters.backendAPIKeySecret requires topology.parameters.externalAccess EnvoyAIGateway", common.ComponentPredictor)
 	}
 	if topo.TokenLimitPerHour != nil {
 		if !topo.UsesAIGateway() {
@@ -273,9 +275,11 @@ func validateRuntimeModel(params components.ModelServerCustomSpec) error {
 		"command":          len(params.Command) > 0,
 		"port":             params.Port != nil,
 		"healthPath":       params.HealthPath != "",
-		"openAICompatible": params.OpenAICompatible,
-		"servedModelName":  params.ServedModelName != "",
-		"imagePullSecret":  params.ImagePullSecret != "",
+		"openAICompatible":    params.OpenAICompatible,
+		"apiSchema":           params.APISchema != "",
+		"backendAPIKeySecret": params.BackendAPIKeySecret != "",
+		"servedModelName":     params.ServedModelName != "",
+		"imagePullSecret":     params.ImagePullSecret != "",
 	}
 	for _, field := range slices.Sorted(maps.Keys(imageOnly)) {
 		if imageOnly[field] {
@@ -307,6 +311,20 @@ func validateCustomContainer(params components.ModelServerCustomSpec) error {
 	if params.ImagePullSecret != "" {
 		if errs := validation.IsDNS1123Subdomain(params.ImagePullSecret); len(errs) > 0 {
 			return fmt.Errorf("%s.parameters.imagePullSecret: %s", common.ComponentPredictor, strings.Join(errs, "; "))
+		}
+	}
+	switch params.APISchema {
+	case "", components.APISchemaOpenAI:
+	case components.APISchemaTypeSafe:
+		if params.OpenAICompatible {
+			return fmt.Errorf("%s.parameters.openAICompatible conflicts with apiSchema %q", common.ComponentPredictor, params.APISchema)
+		}
+	default:
+		return fmt.Errorf("%s.parameters.apiSchema must be %s or %s", common.ComponentPredictor, components.APISchemaOpenAI, components.APISchemaTypeSafe)
+	}
+	if params.BackendAPIKeySecret != "" {
+		if errs := validation.IsDNS1123Subdomain(params.BackendAPIKeySecret); len(errs) > 0 {
+			return fmt.Errorf("%s.parameters.backendAPIKeySecret: %s", common.ComponentPredictor, strings.Join(errs, "; "))
 		}
 	}
 	if params.StorageContainer != "" && params.StorageURI == "" {
@@ -723,20 +741,24 @@ const (
 	openAIPrefix       = "/v1"
 )
 
-// predictorOpenAIPrefix returns where the predictor serves the OpenAI API, or
-// "" when it does not. Of the runtimes, only Hugging Face embeddings qualify:
-// the AI Gateway route exposes no other runtime endpoint.
-func predictorOpenAIPrefix(params components.ModelServerCustomSpec) string {
+// predictorGatewaySchema returns the API the predictor serves to the Envoy AI
+// Gateway, or false when it serves none the gateway can route. Of the
+// runtimes, only Hugging Face embeddings qualify: the AI Gateway route exposes
+// no other runtime endpoint.
+func predictorGatewaySchema(params components.ModelServerCustomSpec) (aiGatewaySchema, bool) {
 	switch {
 	case params.UsesCustomContainer():
-		if params.OpenAICompatible {
-			return openAIPrefix
+		switch params.ResolvedAPISchema() {
+		case components.APISchemaOpenAI:
+			return aiGatewaySchema{name: components.APISchemaOpenAI, prefix: openAIPrefix}, true
+		case components.APISchemaTypeSafe:
+			return aiGatewaySchema{name: components.APISchemaTypeSafe}, true
 		}
-		return ""
+		return aiGatewaySchema{}, false
 	case strings.EqualFold(params.ModelFormat, huggingFaceModelFormat) && params.Task == textEmbeddingTask:
-		return kserveOpenAIPrefix
+		return aiGatewaySchema{name: components.APISchemaOpenAI, prefix: kserveOpenAIPrefix}, true
 	}
-	return ""
+	return aiGatewaySchema{}, false
 }
 
 // syncPredictorAIGateway registers the predictor on the shared AI Gateway, or
@@ -749,14 +771,24 @@ func syncPredictorAIGateway(c *controller.Context, topo predictor.PredictorTopol
 		if err := cleanupAIGateway(c); err != nil {
 			return err
 		}
+		if err := deleteAIGatewayObject(c, backendSecurityPolicyGVK, aiGatewayRouteSuffix); err != nil {
+			return err
+		}
 		if err := deleteAIGatewayObject(c, aiServiceBackendGVK, aiGatewayRouteSuffix); err != nil {
 			return err
 		}
 		return deleteAIGatewayObject(c, envoyBackendGVK, aiGatewayRouteSuffix)
 	}
+	apiSchema, _ := predictorGatewaySchema(params)
 	host := fmt.Sprintf("%s-predictor.%s.svc.cluster.local", c.Name(), c.Namespace())
-	backend, aiBackend := buildServiceBackends(c.Name(), c.Namespace(), host, predictorServicePort, predictorOpenAIPrefix(params))
-	return syncAIGateway(c, c.Name(), topo.TokenLimitPerHour, predictorAIBackendRef(aiBackend.GetName(), c.Name(), params), backend, aiBackend)
+	backend, aiBackend := buildServiceBackends(c.Name(), c.Namespace(), host, predictorServicePort, apiSchema)
+	backends := []*unstructured.Unstructured{backend, aiBackend}
+	if params.BackendAPIKeySecret != "" {
+		backends = append(backends, buildBackendAPIKeyPolicy(c.Name(), c.Namespace(), params.BackendAPIKeySecret))
+	} else if err := deleteAIGatewayObject(c, backendSecurityPolicyGVK, aiGatewayRouteSuffix); err != nil {
+		return err
+	}
+	return syncAIGateway(c, c.Name(), topo.TokenLimitPerHour, predictorAIBackendRef(aiBackend.GetName(), c.Name(), params), backends...)
 }
 
 // predictorAIBackendRef routes to the AIServiceBackend. Clients send the
@@ -788,7 +820,7 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 		var topo predictor.PredictorTopologyParameters
 		c.TryDecodeTopologyParameters(&topo)
 		if topo.UsesAIGateway() {
-			details, waiting, err := aiGatewayConnectionDetails(c, c.Name())
+			details, waiting, err := aiGatewayConnectionDetails(c, c.Name(), predictorClientBasePath(c))
 			if err != nil {
 				return controller.Status{}, err
 			}
@@ -812,6 +844,17 @@ func (p *Provider) statusPredictor(c *controller.Context) (controller.Status, er
 	// model), so surface it as Provisioning and let the condition message
 	// explain the current state rather than flipping the Instance to Failed.
 	return controller.Provisioning(conditionMessage(ready, "InferenceService is being created")), nil
+}
+
+// predictorClientBasePath is the gateway path clients of the predictor use as
+// their base URL: /typesafe for a TypeSafe image, /v1 otherwise.
+func predictorClientBasePath(c *controller.Context) string {
+	var params components.ModelServerCustomSpec
+	c.TryDecodeComponentParameters(c.Instance().Spec.Components[common.ComponentPredictor], &params)
+	if apiSchema, ok := predictorGatewaySchema(params); ok {
+		return apiSchema.clientBasePath()
+	}
+	return openAIBasePath
 }
 
 // predictorServedModelName is the model name clients send directly to the

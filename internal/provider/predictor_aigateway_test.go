@@ -1,15 +1,19 @@
 package provider
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 
@@ -30,10 +34,15 @@ func TestValidatePredictorAIGateway(t *testing.T) {
 	}{
 		{name: "embedding model", enabled: true, params: embeddings, topo: gateway},
 		{name: "chart gateway disabled", params: embeddings, topo: gateway, wantErr: "aiGateway.enabled"},
-		{name: "not an embedding model", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}, topo: gateway, wantErr: "OpenAI-compatible"},
-		{name: "huggingface without the embedding task", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: "hf://org/model"}, topo: gateway, wantErr: "OpenAI-compatible"},
+		{name: "not an embedding model", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "sklearn", StorageURI: "gs://bucket/iris"}, topo: gateway, wantErr: "an API the gateway routes"},
+		{name: "huggingface without the embedding task", enabled: true, params: components.ModelServerCustomSpec{ModelFormat: "huggingface", StorageURI: "hf://org/model"}, topo: gateway, wantErr: "an API the gateway routes"},
 		{name: "OpenAI-compatible image", enabled: true, params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", OpenAICompatible: true}, topo: gateway},
-		{name: "image without openAICompatible", enabled: true, params: components.ModelServerCustomSpec{Image: "ghcr.io/example/server:1"}, topo: gateway, wantErr: "OpenAI-compatible"},
+		{name: "image without an API schema", enabled: true, params: components.ModelServerCustomSpec{Image: "ghcr.io/example/server:1"}, topo: gateway, wantErr: "apiSchema"},
+		{name: "TypeSafe image", enabled: true, params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", APISchema: "TypeSafe"}, topo: gateway},
+		{
+			name: "TypeSafe image with a backend key", enabled: true, topo: gateway,
+			params: components.ModelServerCustomSpec{Image: "vllm/vllm-openai", APISchema: "TypeSafe", BackendAPIKeySecret: "openjev-shim"},
+		},
 		{
 			name: "model name served by another route", enabled: true, params: embeddings, topo: gateway,
 			routes:  []client.Object{aiGatewayRouteObject("other", "iris-ai-gateway", "gw", "gw-ns", "iris")},
@@ -79,7 +88,7 @@ func TestValidatePredictorAIGateway(t *testing.T) {
 }
 
 func TestBuildServiceBackends(t *testing.T) {
-	backend, aiBackend := buildServiceBackends("minilm", "models", "minilm-predictor.models.svc.cluster.local", 80, "/openai/v1")
+	backend, aiBackend := buildServiceBackends("minilm", "models", "minilm-predictor.models.svc.cluster.local", 80, aiGatewaySchema{name: "OpenAI", prefix: "/openai/v1"})
 
 	if backend.GroupVersionKind() != envoyBackendGVK || backend.GetName() != "minilm-ai-gateway" || backend.GetNamespace() != "models" {
 		t.Fatalf("backend = %s %s/%s", backend.GroupVersionKind(), backend.GetNamespace(), backend.GetName())
@@ -103,9 +112,90 @@ func TestBuildServiceBackends(t *testing.T) {
 	}
 }
 
+func TestBuildServiceBackendsTypeSafe(t *testing.T) {
+	_, aiBackend := buildServiceBackends("openjev", "decisions", "openjev-predictor.decisions.svc.cluster.local", 80, aiGatewaySchema{name: "TypeSafe"})
+	schema, _, _ := unstructured.NestedMap(aiBackend.Object, "spec", "schema")
+	if want := map[string]any{"name": "TypeSafe", "version": "v1"}; !reflect.DeepEqual(schema, want) {
+		t.Fatalf("schema = %#v, want %#v", schema, want)
+	}
+}
+
+func TestBuildBackendAPIKeyPolicy(t *testing.T) {
+	policy := buildBackendAPIKeyPolicy("openjev", "decisions", "openjev-shim")
+	if policy.GroupVersionKind() != backendSecurityPolicyGVK || policy.GetName() != "openjev-ai-gateway" || policy.GetNamespace() != "decisions" {
+		t.Fatalf("policy = %s %s/%s", policy.GroupVersionKind(), policy.GetNamespace(), policy.GetName())
+	}
+	spec, _, _ := unstructured.NestedMap(policy.Object, "spec")
+	want := map[string]any{
+		"targetRefs": []any{map[string]any{"group": "aigateway.envoyproxy.io", "kind": "AIServiceBackend", "name": "openjev-ai-gateway"}},
+		"type":       "APIKey",
+		"apiKey":     map[string]any{"secretRef": map[string]any{"name": "openjev-shim"}},
+	}
+	if !reflect.DeepEqual(spec, want) {
+		t.Fatalf("policy spec = %#v, want %#v", spec, want)
+	}
+}
+
 func TestPredictorAIGatewayServiceType(t *testing.T) {
 	topo := predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessEnvoyAIGateway}
 	if got := topo.ResolvedServiceType(); got != "ClusterIP" {
 		t.Fatalf("ResolvedServiceType() = %q, want ClusterIP: the gateway needs no external Service", got)
+	}
+}
+
+func TestSyncPredictorAIGatewayBackendAPIKey(t *testing.T) {
+	t.Setenv("AI_GATEWAY_ENABLED", "true")
+	t.Setenv("AI_GATEWAY_NAME", "gw")
+	t.Setenv("AI_GATEWAY_NAMESPACE", "gw-ns")
+
+	mapper := meta.NewDefaultRESTMapper(nil)
+	for _, gvk := range []schema.GroupVersionKind{envoyBackendGVK, aiServiceBackendGVK, backendSecurityPolicyGVK, aiGatewayRouteGVK, backendTrafficPolicyGVK} {
+		mapper.Add(gvk, meta.RESTScopeNamespace)
+	}
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithRESTMapper(mapper).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// The fake client cannot server-side apply CRD kinds it has no schema for.
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				err := cl.Create(ctx, obj)
+				if !apierrors.IsAlreadyExists(err) {
+					return err
+				}
+				existing := &unstructured.Unstructured{}
+				existing.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+				if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+					return err
+				}
+				obj.SetResourceVersion(existing.GetResourceVersion())
+				return cl.Update(ctx, obj)
+			},
+		}).Build()
+	topo := predictor.PredictorTopologyParameters{ExternalAccess: predictor.ExternalAccessEnvoyAIGateway}
+	params := components.ModelServerCustomSpec{Image: "vllm/vllm-openai", APISchema: "TypeSafe", BackendAPIKeySecret: "openjev-shim"}
+	c := predictorContext(t, cl, corev1alpha1.ComponentSpec{Parameters: rawJSON(t, params)})
+
+	if err := syncPredictorAIGateway(c, topo, params); err != nil {
+		t.Fatal(err)
+	}
+	aiBackend := &unstructured.Unstructured{}
+	aiBackend.SetGroupVersionKind(aiServiceBackendGVK)
+	if err := cl.Get(t.Context(), client.ObjectKey{Namespace: "ns", Name: "iris-ai-gateway"}, aiBackend); err != nil {
+		t.Fatal(err)
+	}
+	if name, _, _ := unstructured.NestedString(aiBackend.Object, "spec", "schema", "name"); name != "TypeSafe" {
+		t.Fatalf("AIServiceBackend schema = %q, want TypeSafe", name)
+	}
+	policy := &unstructured.Unstructured{}
+	policy.SetGroupVersionKind(backendSecurityPolicyGVK)
+	key := client.ObjectKey{Namespace: "ns", Name: "iris-ai-gateway"}
+	if err := cl.Get(t.Context(), key, policy); err != nil {
+		t.Fatalf("BackendSecurityPolicy not created: %v", err)
+	}
+
+	params.BackendAPIKeySecret = ""
+	if err := syncPredictorAIGateway(c, topo, params); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Get(t.Context(), key, policy); !apierrors.IsNotFound(err) {
+		t.Fatalf("BackendSecurityPolicy after removing the secret: err = %v, want NotFound", err)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
+	"github.com/openeverest/provider-kserve/definition/components"
 	"github.com/openeverest/provider-kserve/internal/common"
 )
 
@@ -33,6 +34,12 @@ const (
 	legacyUserIDHeader = "x-user-id"
 
 	openAIBasePath = "/v1"
+	// typeSafeBasePath is where the Envoy AI Gateway serves the TypeSafe
+	// System One API: clients POST {base}/v1/systemone.
+	typeSafeBasePath = "/typesafe"
+	// typeSafeAPIVersion is the TypeSafe API version the gateway forwards to:
+	// POST /v1/systemone on the backend.
+	typeSafeAPIVersion = "v1"
 )
 
 var (
@@ -44,6 +51,9 @@ var (
 	}
 	aiServiceBackendGVK = schema.GroupVersionKind{
 		Group: "aigateway.envoyproxy.io", Version: "v1beta1", Kind: "AIServiceBackend",
+	}
+	backendSecurityPolicyGVK = schema.GroupVersionKind{
+		Group: "aigateway.envoyproxy.io", Version: "v1beta1", Kind: "BackendSecurityPolicy",
 	}
 	envoyBackendGVK = schema.GroupVersionKind{
 		Group: "gateway.envoyproxy.io", Version: "v1alpha1", Kind: "Backend",
@@ -156,11 +166,35 @@ func inferencePoolBackendRef(instanceName string) map[string]any {
 	}
 }
 
+// aiGatewaySchema is the API a backend serves to the Envoy AI Gateway.
+type aiGatewaySchema struct {
+	// name is the Envoy AI Gateway schema name: OpenAI or TypeSafe.
+	name string
+	// prefix is where an OpenAI backend serves the API, e.g. /v1.
+	prefix string
+}
+
+// spec is the AIServiceBackend spec.schema.
+func (s aiGatewaySchema) spec() map[string]any {
+	if s.name == components.APISchemaTypeSafe {
+		return map[string]any{"name": s.name, "version": typeSafeAPIVersion}
+	}
+	return map[string]any{"name": s.name, "prefix": s.prefix}
+}
+
+// clientBasePath is the gateway path clients use as their SDK base URL.
+func (s aiGatewaySchema) clientBasePath() string {
+	if s.name == components.APISchemaTypeSafe {
+		return typeSafeBasePath
+	}
+	return openAIBasePath
+}
+
 // buildServiceBackends returns the Envoy Gateway Backend for an in-cluster
-// Service and the AIServiceBackend that speaks the OpenAI API to it under
-// pathPrefix; AIServiceBackends cannot reference a Service directly. Both
-// share the route's name.
-func buildServiceBackends(instanceName, namespace, host string, port int32, pathPrefix string) (backend, aiBackend *unstructured.Unstructured) {
+// Service and the AIServiceBackend that speaks apiSchema to it; an
+// AIServiceBackend cannot reference a Service directly. Both share the
+// route's name.
+func buildServiceBackends(instanceName, namespace, host string, port int32, apiSchema aiGatewaySchema) (backend, aiBackend *unstructured.Unstructured) {
 	name := aiGatewayRouteName(instanceName)
 	backend = &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": envoyBackendGVK.GroupVersion().String(),
@@ -178,7 +212,7 @@ func buildServiceBackends(instanceName, namespace, host string, port int32, path
 		"kind":       aiServiceBackendGVK.Kind,
 		"metadata":   map[string]any{"name": name, "namespace": namespace},
 		"spec": map[string]any{
-			"schema": map[string]any{"name": "OpenAI", "prefix": pathPrefix},
+			"schema": apiSchema.spec(),
 			"backendRef": map[string]any{
 				"group": envoyBackendGVK.Group,
 				"kind":  envoyBackendGVK.Kind,
@@ -188,6 +222,29 @@ func buildServiceBackends(instanceName, namespace, host string, port int32, path
 	}}
 	aiBackend.SetGroupVersionKind(aiServiceBackendGVK)
 	return backend, aiBackend
+}
+
+// buildBackendAPIKeyPolicy makes the Envoy AI Gateway authenticate to the
+// route's AIServiceBackend with the apiKey entry of secretName, sent as a
+// bearer token. The client's own gateway key never reaches the backend.
+func buildBackendAPIKeyPolicy(instanceName, namespace, secretName string) *unstructured.Unstructured {
+	name := aiGatewayRouteName(instanceName)
+	policy := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": backendSecurityPolicyGVK.GroupVersion().String(),
+		"kind":       backendSecurityPolicyGVK.Kind,
+		"metadata":   map[string]any{"name": name, "namespace": namespace},
+		"spec": map[string]any{
+			"targetRefs": []any{map[string]any{
+				"group": aiServiceBackendGVK.Group,
+				"kind":  aiServiceBackendGVK.Kind,
+				"name":  name,
+			}},
+			"type":   "APIKey",
+			"apiKey": map[string]any{"secretRef": map[string]any{"name": secretName}},
+		},
+	}}
+	policy.SetGroupVersionKind(backendSecurityPolicyGVK)
+	return policy
 }
 
 // aiGatewayRouteModels returns the model names an AIGatewayRoute matches on.
@@ -343,7 +400,9 @@ func buildTokenRateLimitPolicy(
 	return policy
 }
 
-func aiGatewayConnectionDetails(c *controller.Context, modelName string) (controller.ConnectionDetails, string, error) {
+// aiGatewayConnectionDetails returns the gateway address, model and API key
+// once the route is accepted; basePath is the API's path on the gateway.
+func aiGatewayConnectionDetails(c *controller.Context, modelName, basePath string) (controller.ConnectionDetails, string, error) {
 	route := &unstructured.Unstructured{}
 	route.SetGroupVersionKind(aiGatewayRouteGVK)
 	routeName := aiGatewayRouteName(c.Name())
@@ -385,7 +444,7 @@ func aiGatewayConnectionDetails(c *controller.Context, modelName string) (contro
 		return controller.ConnectionDetails{}, "Waiting for Envoy AI Gateway address", nil
 	}
 
-	details := gatewayConnectionDetails(address)
+	details := gatewayConnectionDetails(address, basePath)
 	details.AdditionalProperties = map[string]string{"model": modelName}
 	if common.AIGatewayAuthEnabled() {
 		keyID, key, err := readAIGatewayKey(c)
@@ -421,7 +480,7 @@ func routeAcceptance(route *unstructured.Unstructured) (bool, string) {
 	return false, "Waiting for Envoy AI Gateway route acceptance"
 }
 
-func gatewayConnectionDetails(address string) controller.ConnectionDetails {
+func gatewayConnectionDetails(address, basePath string) controller.ConnectionDetails {
 	scheme := common.AIGatewayScheme()
 	port := common.AIGatewayPort()
 	host := address
@@ -452,7 +511,7 @@ func gatewayConnectionDetails(address string) controller.ConnectionDetails {
 		Provider: common.ProviderName,
 		Host:     host,
 		Port:     port,
-		URI:      (&url.URL{Scheme: scheme, Host: uriHost, Path: openAIBasePath}).String(),
+		URI:      (&url.URL{Scheme: scheme, Host: uriHost, Path: basePath}).String(),
 	}
 }
 

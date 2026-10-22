@@ -211,7 +211,7 @@ func TestGatewayConnectionDetails(t *testing.T) {
 	t.Setenv("AI_GATEWAY_PORT", "8443")
 	t.Setenv("AI_GATEWAY_HOSTNAME", "llm.example.com")
 
-	details := gatewayConnectionDetails("gateway.example.com")
+	details := gatewayConnectionDetails("gateway.example.com", openAIBasePath)
 	if details.Host != "llm.example.com" || details.Port != "8443" {
 		t.Fatalf("connection address = %s:%s", details.Host, details.Port)
 	}
@@ -220,12 +220,23 @@ func TestGatewayConnectionDetails(t *testing.T) {
 	}
 }
 
+func TestGatewayConnectionDetailsTypeSafeBasePath(t *testing.T) {
+	t.Setenv("AI_GATEWAY_SCHEME", "https")
+	t.Setenv("AI_GATEWAY_PORT", "443")
+	t.Setenv("AI_GATEWAY_HOSTNAME", "")
+
+	details := gatewayConnectionDetails("gateway.example.com", typeSafeBasePath)
+	if details.URI != "https://gateway.example.com/typesafe" {
+		t.Fatalf("connection URI = %q, want https://gateway.example.com/typesafe", details.URI)
+	}
+}
+
 func TestGatewayConnectionDetailsUsesGatewayAddressWithoutConfiguredHostname(t *testing.T) {
 	t.Setenv("AI_GATEWAY_SCHEME", "http")
 	t.Setenv("AI_GATEWAY_PORT", "80")
 	t.Setenv("AI_GATEWAY_HOSTNAME", "")
 
-	details := gatewayConnectionDetails("gateway.example.com")
+	details := gatewayConnectionDetails("gateway.example.com", openAIBasePath)
 	if details.Host != "gateway.example.com" || details.URI != "http://gateway.example.com/v1" {
 		t.Fatalf("connection details = %#v", details)
 	}
