@@ -72,28 +72,44 @@ See `examples/instance-llm-lora.yaml`.
 
 ## 2.3 Pre-pull / cache model weights on nodes
 
-**Status:** Partial — `disableStorageInitializer` supports pre-loaded models;
-the `LocalModelCache` wiring is not exposed as a provider field.
+Status: Supported with the optional KServe LocalModel controller.
 
-As an ML engineer, I want large weights pre-pulled and cached on nodes, so that
-new replicas start fast and I do not re-download gigabytes on every rollout.
+As an ML engineer, I want large weights cached on selected nodes. New replicas
+can then start without downloading the same model again.
 
-**Acceptance criteria**
-- A model can be pre-populated onto nodes (LocalModelCache / modelcar / PVC).
-- When a model is pre-loaded, the storage-initializer can be skipped.
-- Cold-start time for a new replica drops to node-local read speed.
+Acceptance criteria
+- An administrator can manage node groups and namespace caches in the OpenEverest UI.
+- Kubernetes YAML and GitOps remain supported.
+- KServe matches the Instance model URI to a cache automatically.
+- The Instance status shows available, total, and failed node copies.
+- A cached model Pod mounts the cache PVC without a storage-initializer container.
 
-**Provider mapping**
+Provider mapping
 ```yaml
-components:
-  llmEngine:
-    parameters:
-      disableStorageInitializer: true   # model already on-node (cache/modelcar)
+# Helm values
+kserveResources:
+  kserve:
+    localmodel:
+      enabled: true
+
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: LocalModelNamespaceCache
+metadata:
+  name: qwen3-4b
+  namespace: models
+spec:
+  sourceModelUri: hf://Qwen/Qwen3-4B
+  modelSize: 10Gi
+  nodeGroups:
+    - model-workers
 ```
 
-**Gap to close:** expose a `LocalModelCache` reference (or a `cache: true`
-convenience) so the provider provisions the cache rather than requiring the
-model to be staged out-of-band.
+The Instance uses the same `modelURI`. Leave `disableStorageInitializer`
+unset. KServe uses the storage initialization path to replace the URI with the
+cached PVC.
+
+See `docs/local-model-cache.md` and `examples/local-model-cache.yaml`.
 
 ---
 

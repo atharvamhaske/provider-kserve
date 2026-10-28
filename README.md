@@ -77,9 +77,10 @@ provider itself is covered under [Installation](#installation).
 | Custom configuration | ✅ | structured parameters, plus inline spec config for both `llm` and `predictor` |
 | Monitoring | ✅ | a `PodMonitor` per `llm` and `predictor` Instance; gateway token/cost metrics when the AI Gateway is enabled |
 | TLS | ✅ | optional HTTPS on the shared Envoy AI Gateway, issued by cert-manager |
+| Node-local model cache | ✅ | optional KServe LocalModel controller; see [Cache model weights on nodes](docs/local-model-cache.md) |
 
-Models are pulled from the URI given in the component parameters (`hf://`, `s3://`, `gs://`,
-`pvc://`), so this provider manages no persistent volumes and has no backup story.
+By default, model Pods pull from the component URI (`hf://`, `s3://`, `gs://`, or `pvc://`).
+The optional KServe LocalModel controller can pre-populate node-local PVs and reuse them across Pod starts.
 
 ## Installation
 
@@ -98,6 +99,16 @@ the KServe controllers, their `ClusterServingRuntime`s and LLM presets, and the 
 helm install provider-kserve \
   oci://ghcr.io/openeverest/charts/provider-kserve -n everest-system
 ```
+
+Enable node-local model caching when repeated model downloads are too expensive:
+
+```bash
+helm install provider-kserve \
+  oci://ghcr.io/openeverest/charts/provider-kserve -n everest-system \
+  --set kserveResources.kserve.localmodel.enabled=true
+```
+
+See [Cache model weights on nodes](docs/local-model-cache.md) for node preparation, credentials, and cache resources.
 
 Add the AI Gateway and multi-node (LeaderWorkerSet) support in the same command:
 
@@ -191,6 +202,7 @@ Complete manifests live in [examples/](examples/):
 - [examples/instance-llm-cpu.yaml](examples/instance-llm-cpu.yaml) — a small model on CPU
   (compute profile, KV cache sizing, inline advanced config).
 - [examples/instance-predictor.yaml](examples/instance-predictor.yaml) — an sklearn model.
+- [examples/local-model-cache.yaml](examples/local-model-cache.yaml), a node group, namespace cache, and matching CPU model.
 
 Watch it come up and read the connection details:
 
@@ -235,6 +247,7 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
   [definition/](definition/) and published on the `Provider` resource
   (`kubectl get provider provider-kserve -o yaml`). The API server and the UI validate user
   input against these schemas.
+- [Model cache administration](docs/local-model-cache.md)
 
 ### `llmEngine` (vllm) parameters
 
