@@ -6,13 +6,18 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/yaml"
 
 	kservev1alpha2 "github.com/kserve/kserve/pkg/apis/serving/v1alpha2"
+	"github.com/kserve/kserve/pkg/constants"
 
 	commonv1alpha1 "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
@@ -60,6 +65,15 @@ const (
 	// gpuLibraryPathEnv for the full rationale.
 	gpuLibraryPathEnvVar = "LIBRARY_PATH"
 	gpuLibraryPathValue  = "/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
+)
+
+var (
+	localModelCacheGVK = schema.GroupVersionKind{
+		Group: "serving.kserve.io", Version: "v1alpha1", Kind: "LocalModelCache",
+	}
+	localModelNamespaceCacheGVK = schema.GroupVersionKind{
+		Group: "serving.kserve.io", Version: "v1alpha1", Kind: "LocalModelNamespaceCache",
+	}
 )
 
 // workloadPodSelector returns the label selector KServe stamps on an
@@ -1037,10 +1051,15 @@ func (p *Provider) statusLLM(c *controller.Context) (controller.Status, error) {
 		return controller.Provisioning("Waiting for LLMInferenceService"), nil
 	}
 
+	cacheMessage, err := localModelCacheStatusMessage(c, llmisvc)
+	if err != nil {
+		return controller.Status{}, err
+	}
+
 	ready := llmisvc.Status.GetCondition(apis.ConditionReady)
 	if ready != nil && ready.IsTrue() {
 		if waiting := unservedWorkload(llmisvc.Status.Workloads); waiting != "" {
-			return controller.Provisioning(waiting), nil
+			return withStatusMessage(controller.Provisioning(waiting), cacheMessage), nil
 		}
 
 		var topo llm.LlmTopologyParameters
@@ -1057,24 +1076,88 @@ func (p *Provider) statusLLM(c *controller.Context) (controller.Status, error) {
 				return controller.Status{}, err
 			}
 			if waiting != "" {
-				return controller.Provisioning(waiting), nil
+				return withStatusMessage(controller.Provisioning(waiting), cacheMessage), nil
 			}
-			return controller.ReadyWithConnectionDetails(details), nil
+			return withStatusMessage(controller.ReadyWithConnectionDetails(details), cacheMessage), nil
 		}
 
 		// Otherwise surface connection details from the external Service or
 		// direct KServe workload URL.
 		details, err := p.llmConnectionDetails(c, llmisvc)
 		if err != nil {
-			return controller.Provisioning(err.Error()), nil
+			return withStatusMessage(controller.Provisioning(err.Error()), cacheMessage), nil
 		}
 		if details != nil {
-			return controller.ReadyWithConnectionDetails(*details), nil
+			return withStatusMessage(controller.ReadyWithConnectionDetails(*details), cacheMessage), nil
 		}
-		return controller.Ready(), nil
+		return withStatusMessage(controller.Ready(), cacheMessage), nil
 	}
 
-	return controller.Provisioning(conditionMessage(ready, "LLMInferenceService is being created")), nil
+	status := controller.Provisioning(conditionMessage(ready, "LLMInferenceService is being created"))
+	return withStatusMessage(status, cacheMessage), nil
+}
+
+func localModelCacheStatusMessage(c *controller.Context, llmisvc *kservev1alpha2.LLMInferenceService) (string, error) {
+	name := llmisvc.Labels[constants.LocalModelLabel]
+	if name == "" {
+		return "", nil
+	}
+
+	gvk := localModelCacheGVK
+	namespace := ""
+	if cacheNamespace := llmisvc.Labels[constants.LocalModelNamespaceLabel]; cacheNamespace != "" {
+		gvk = localModelNamespaceCacheGVK
+		namespace = cacheNamespace
+	}
+
+	cache := unstructuredObject(gvk)
+	err := c.Client().Get(c.Context(), types.NamespacedName{Name: name, Namespace: namespace}, cache)
+	if apierrors.IsNotFound(err) {
+		return fmt.Sprintf("Model cache %q not found", name), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("getting %s %q: %w", gvk.Kind, name, err)
+	}
+
+	copies, found, err := unstructured.NestedMap(cache.Object, "status", "copies")
+	if err != nil {
+		return "", fmt.Errorf("reading %s %q status: %w", gvk.Kind, name, err)
+	}
+	if !found {
+		return fmt.Sprintf("Model cache %q is preparing", name), nil
+	}
+
+	available, _, err := unstructured.NestedInt64(copies, "available")
+	if err != nil {
+		return "", fmt.Errorf("reading %s %q available copies: %w", gvk.Kind, name, err)
+	}
+	total, _, err := unstructured.NestedInt64(copies, "total")
+	if err != nil {
+		return "", fmt.Errorf("reading %s %q total copies: %w", gvk.Kind, name, err)
+	}
+	failed, _, err := unstructured.NestedInt64(copies, "failed")
+	if err != nil {
+		return "", fmt.Errorf("reading %s %q failed copies: %w", gvk.Kind, name, err)
+	}
+	if total == 0 {
+		return fmt.Sprintf("Model cache %q is preparing", name), nil
+	}
+	if failed > 0 {
+		return fmt.Sprintf("Model cache %q: %d/%d nodes ready, %d failed", name, available, total, failed), nil
+	}
+	return fmt.Sprintf("Model cache %q: %d/%d nodes ready", name, available, total), nil
+}
+
+func withStatusMessage(status controller.Status, message string) controller.Status {
+	if message == "" {
+		return status
+	}
+	if status.Message == "" {
+		status.Message = message
+	} else {
+		status.Message += "; " + message
+	}
+	return status
 }
 
 // unservedWorkload names the first model workload without a ready pod. KServe

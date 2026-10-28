@@ -25,6 +25,9 @@ package provider
 // The provider materializes a per-Instance LLMInferenceServiceConfig from the
 // inline Advanced config, so it needs write verbs (not just read) on configs.
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=llminferenceserviceconfigs,verbs=get;list;watch;create;update;patch;delete
+// LocalModel cache status is read to surface model population progress on the
+// Instance without taking ownership of cache lifecycle.
+// +kubebuilder:rbac:groups=serving.kserve.io,resources=localmodelcaches;localmodelnamespacecaches,verbs=get;list;watch
 
 // Predictive serving (serving.kserve.io/v1beta1):
 // +kubebuilder:rbac:groups=serving.kserve.io,resources=inferenceservices,verbs=get;list;watch;create;update;patch;delete

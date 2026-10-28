@@ -134,6 +134,8 @@
     - serving.kserve.io
   resources:
     - clusterstoragecontainers
+    - localmodelcaches
+    - localmodelnamespacecaches
   verbs:
     - get
     - list

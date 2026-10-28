@@ -11,9 +11,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/kserve/kserve/pkg/constants"
 
 	kservev1alpha2 "github.com/kserve/kserve/pkg/apis/serving/v1alpha2"
+	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
 
 	commonv1alpha1 "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
@@ -1042,6 +1049,126 @@ func TestUnservedWorkload(t *testing.T) {
 			t.Parallel()
 			if got := unservedWorkload(tt.ws); got != tt.want {
 				t.Fatalf("unservedWorkload() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStatusLLMLocalModelCache(t *testing.T) {
+	t.Parallel()
+
+	readyURL, err := apis.ParseURL("https://llama.example.com/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLLM := func(labels map[string]string) *kservev1alpha2.LLMInferenceService {
+		return &kservev1alpha2.LLMInferenceService{
+			ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "ns", Labels: labels},
+			Status: kservev1alpha2.LLMInferenceServiceStatus{
+				URL: readyURL,
+				Status: duckv1.Status{Conditions: duckv1.Conditions{{
+					Type:   apis.ConditionReady,
+					Status: corev1.ConditionTrue,
+				}}},
+				Workloads: &kservev1alpha2.WorkloadStatus{
+					Primary: &kservev1alpha2.ObservedWorkloadStatus{
+						TypedLocalObjectReference: corev1.TypedLocalObjectReference{Kind: "Deployment", Name: "llama-kserve"},
+						ReadyReplicas:             ptr.To[int32](1),
+					},
+				},
+			},
+		}
+	}
+	copies := func(available, total, failed int64) map[string]any {
+		return map[string]any{"available": available, "total": total, "failed": failed}
+	}
+	newCache := func(kind, name, namespace string, modelCopies map[string]any) client.Object {
+		cache := unstructuredObject(schema.GroupVersionKind{
+			Group: "serving.kserve.io", Version: "v1alpha1", Kind: kind,
+		})
+		cache.SetName(name)
+		cache.SetNamespace(namespace)
+		if modelCopies != nil {
+			cache.Object["status"] = map[string]any{"copies": modelCopies}
+		}
+		return cache
+	}
+
+	tests := []struct {
+		name    string
+		labels  map[string]string
+		cache   client.Object
+		message string
+	}{
+		{
+			name:    "cluster cache ready",
+			labels:  map[string]string{constants.LocalModelLabel: "qwen"},
+			cache:   newCache("LocalModelCache", "qwen", "", copies(3, 3, 0)),
+			message: `Model cache "qwen": 3/3 nodes ready`,
+		},
+		{
+			name: "namespace cache downloading",
+			labels: map[string]string{
+				constants.LocalModelLabel:          "qwen",
+				constants.LocalModelNamespaceLabel: "ns",
+			},
+			cache:   newCache("LocalModelNamespaceCache", "qwen", "ns", copies(1, 3, 0)),
+			message: `Model cache "qwen": 1/3 nodes ready`,
+		},
+		{
+			name:    "cache download failures",
+			labels:  map[string]string{constants.LocalModelLabel: "qwen"},
+			cache:   newCache("LocalModelCache", "qwen", "", copies(1, 3, 2)),
+			message: `Model cache "qwen": 1/3 nodes ready, 2 failed`,
+		},
+		{
+			name:    "cache preparing",
+			labels:  map[string]string{constants.LocalModelLabel: "qwen"},
+			cache:   newCache("LocalModelCache", "qwen", "", nil),
+			message: `Model cache "qwen" is preparing`,
+		},
+		{
+			name:    "stale cache reference",
+			labels:  map[string]string{constants.LocalModelLabel: "missing"},
+			message: `Model cache "missing" not found`,
+		},
+		{
+			name: "no cache",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			for _, addToScheme := range []func(*runtime.Scheme) error{
+				corev1alpha1.AddToScheme,
+				kservev1alpha2.AddToScheme,
+			} {
+				if err := addToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			objects := []client.Object{newLLM(tt.labels)}
+			if tt.cache != nil {
+				objects = append(objects, tt.cache)
+			}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			inst := llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{}).Instance()
+			c := controller.NewContext(context.Background(), cl, inst, common.ProviderName)
+
+			got, err := (&Provider{}).statusLLM(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Phase != corev1alpha1.InstancePhaseReady {
+				t.Fatalf("phase = %q, want Ready", got.Phase)
+			}
+			if got.Message != tt.message {
+				t.Fatalf("message = %q, want %q", got.Message, tt.message)
+			}
+			if got.ConnectionDetails.Host != "llama.example.com" || got.ConnectionDetails.Port != "443" {
+				t.Fatalf("connection details = %#v, want original HTTPS endpoint", got.ConnectionDetails)
 			}
 		})
 	}
