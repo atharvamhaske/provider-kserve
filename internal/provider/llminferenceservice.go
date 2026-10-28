@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/yaml"
@@ -222,7 +223,48 @@ func validateLLM(c *controller.Context) error {
 			return err
 		}
 	}
+	if err := validateLocalModelCache(params); err != nil {
+		return err
+	}
 	return validateLoRAParams(c.Name(), params)
+}
+
+func validateLocalModelCache(params components.VllmCustomSpec) error {
+	cache := params.LocalModelCache
+	if cache == nil || !cache.Enabled {
+		return nil
+	}
+	const field = "llmEngine.parameters.localModelCache"
+	if !common.LocalModelEnabled() {
+		return fmt.Errorf("%s.enabled requires kserveResources.kserve.localmodel.enabled in the provider chart", field)
+	}
+	if ptr.Deref(params.DisableStorageInitializer, false) {
+		return fmt.Errorf("%s requires disableStorageInitializer must remain false", field)
+	}
+	if strings.TrimSpace(cache.ModelSize) == "" {
+		return fmt.Errorf("%s.modelSize is required", field)
+	}
+	size, err := resource.ParseQuantity(strings.TrimSpace(cache.ModelSize))
+	if err != nil {
+		return fmt.Errorf("%s.modelSize %q is invalid: %w", field, cache.ModelSize, err)
+	}
+	if size.Sign() <= 0 {
+		return fmt.Errorf("%s.modelSize must be greater than zero", field)
+	}
+	nodeGroup := strings.TrimSpace(cache.NodeGroup)
+	if nodeGroup == "" {
+		return fmt.Errorf("%s.nodeGroup is required", field)
+	}
+	if problems := validation.IsDNS1123Subdomain(nodeGroup); len(problems) > 0 {
+		return fmt.Errorf("%s.nodeGroup %q is invalid: %s", field, cache.NodeGroup, strings.Join(problems, "; "))
+	}
+	serviceAccount := strings.TrimSpace(cache.ServiceAccountName)
+	if serviceAccount != "" {
+		if problems := validation.IsDNS1123Subdomain(serviceAccount); len(problems) > 0 {
+			return fmt.Errorf("%s.serviceAccountName %q is invalid: %s", field, cache.ServiceAccountName, strings.Join(problems, "; "))
+		}
+	}
+	return nil
 }
 
 // workloadScaling is the min/max/actuator triple shared by decode and prefill.
@@ -913,8 +955,105 @@ func applyStorageInitializerResources(spec *kservev1alpha2.LLMInferenceServiceSp
 	}
 }
 
+func buildLocalModelNamespaceCache(c *controller.Context, params components.VllmCustomSpec) *unstructured.Unstructured {
+	cache := unstructuredObject(localModelNamespaceCacheGVK)
+	cache.SetName(c.Name())
+	cache.SetNamespace(c.Namespace())
+	spec := map[string]any{
+		"sourceModelUri": params.ModelURI,
+		"modelSize":      strings.TrimSpace(params.LocalModelCache.ModelSize),
+		"nodeGroups":     []any{strings.TrimSpace(params.LocalModelCache.NodeGroup)},
+	}
+	if serviceAccount := strings.TrimSpace(params.LocalModelCache.ServiceAccountName); serviceAccount != "" {
+		spec["serviceAccountName"] = serviceAccount
+	}
+	cache.Object["spec"] = spec
+	return cache
+}
+
+func deleteLLMForCacheTransition(c *controller.Context) (bool, error) {
+	llmisvc := &kservev1alpha2.LLMInferenceService{}
+	key := types.NamespacedName{Name: c.Name(), Namespace: c.Namespace()}
+	err := c.Client().Get(c.Context(), key, llmisvc)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("getting LLMInferenceService %q for cache transition: %w", c.Name(), err)
+	}
+	if err := c.Delete(llmisvc); err != nil {
+		return false, fmt.Errorf("deleting LLMInferenceService %q for cache transition: %w", c.Name(), err)
+	}
+	return true, nil
+}
+
+// syncLocalModelCache reconciles an Instance-owned namespace cache before the
+// workload is admitted. It returns false while deleting the workload before a
+// stale cache because KServe protects caches that are still in use.
+func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec) (bool, error) {
+	enabled := params.LocalModelCache != nil && params.LocalModelCache.Enabled
+	if !common.LocalModelEnabled() {
+		if enabled {
+			return false, fmt.Errorf("local model cache requires kserveResources.kserve.localmodel.enabled in the provider chart")
+		}
+		return true, nil
+	}
+
+	cache := unstructuredObject(localModelNamespaceCacheGVK)
+	key := types.NamespacedName{Name: c.Name(), Namespace: c.Namespace()}
+	err := c.Client().Get(c.Context(), key, cache)
+	if apierrors.IsNotFound(err) {
+		if !enabled {
+			return true, nil
+		}
+		desired := buildLocalModelNamespaceCache(c, params)
+		if err := common.Apply(c.Context(), c.Client(), c.Instance(), desired); err != nil {
+			return false, fmt.Errorf("applying LocalModelNamespaceCache %q: %w", c.Name(), err)
+		}
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("getting LocalModelNamespaceCache %q: %w", c.Name(), err)
+	}
+
+	sourceURI, found, err := unstructured.NestedString(cache.Object, "spec", "sourceModelUri")
+	if err != nil {
+		return false, fmt.Errorf("reading LocalModelNamespaceCache %q sourceModelUri: %w", c.Name(), err)
+	}
+	if !enabled || !found || sourceURI != params.ModelURI {
+		workloadDeleted, err := deleteLLMForCacheTransition(c)
+		if err != nil {
+			return false, err
+		}
+		if workloadDeleted {
+			return false, nil
+		}
+		if err := c.Delete(cache); err != nil {
+			return false, fmt.Errorf("deleting LocalModelNamespaceCache %q: %w", c.Name(), err)
+		}
+		return false, nil
+	}
+
+	desired := buildLocalModelNamespaceCache(c, params)
+	if err := common.Apply(c.Context(), c.Client(), c.Instance(), desired); err != nil {
+		return false, fmt.Errorf("applying LocalModelNamespaceCache %q: %w", c.Name(), err)
+	}
+	return true, nil
+}
+
 // syncLLM creates or updates the LLMInferenceService.
 func (p *Provider) syncLLM(c *controller.Context) error {
+	comp := c.Instance().Spec.Components[common.ComponentLlmEngine]
+	var params components.VllmCustomSpec
+	c.TryDecodeComponentParameters(comp, &params)
+	cacheReady, err := syncLocalModelCache(c, params)
+	if err != nil {
+		return err
+	}
+	if !cacheReady {
+		return nil
+	}
+
 	// Provision the HuggingFace token ServiceAccount before the workload so
 	// KServe finds it when it reconciles the storage-initializer.
 	if common.HFTokenSecretName() != "" {

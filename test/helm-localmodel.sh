@@ -30,6 +30,20 @@ crd_hook_command() {
     "$1"
 }
 
+provider_env() {
+  name=$1
+  manifest=$2
+  "$YQ_BIN" ea -r \
+    "select(.kind == \"Deployment\" and .metadata.name == \"provider-kserve\") | .spec.template.spec.containers[] | select(.name == \"provider\") | .env[] | select(.name == \"$name\") | .value" \
+    "$manifest"
+}
+
+cache_ui_path() {
+  "$YQ_BIN" ea -r \
+    'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.enabled.path' \
+    "$1"
+}
+
 if [ -n "$(resource_name Deployment kserve-localmodel-controller-manager "$DEFAULT_MANIFEST")" ]; then
   echo "LocalModel controller rendered while disabled" >&2
   exit 1
@@ -44,6 +58,14 @@ case "$(crd_hook_command "$DEFAULT_MANIFEST")" in
     exit 1
     ;;
 esac
+if [ "$(provider_env LOCAL_MODEL_ENABLED "$DEFAULT_MANIFEST")" != "false" ]; then
+  echo "Provider LocalModel feature flag is not disabled by default" >&2
+  exit 1
+fi
+if [ "$(cache_ui_path "$DEFAULT_MANIFEST")" != "spec.components.llmEngine.parameters.localModelCache.enabled" ]; then
+  echo "Provider cache UI schema is missing" >&2
+  exit 1
+fi
 
 if [ "$(resource_name Deployment kserve-localmodel-controller-manager "$ENABLED_MANIFEST")" != "kserve-localmodel-controller-manager" ]; then
   echo "LocalModel controller missing while enabled" >&2
@@ -55,6 +77,10 @@ if [ "$(resource_name DaemonSet kserve-localmodelnode-agent "$ENABLED_MANIFEST")
 fi
 if [ "$("$YQ_BIN" ea -r 'select(.kind == "ConfigMap" and .metadata.name == "inferenceservice-config") | .data.localModel | from_json | .enabled' "$ENABLED_MANIFEST")" != "true" ]; then
   echo "KServe LocalModel admission config is not enabled" >&2
+  exit 1
+fi
+if [ "$(provider_env LOCAL_MODEL_ENABLED "$ENABLED_MANIFEST")" != "true" ]; then
+  echo "Provider LocalModel feature flag is not enabled" >&2
   exit 1
 fi
 case "$(crd_hook_command "$ENABLED_MANIFEST")" in

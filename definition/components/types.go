@@ -37,6 +37,23 @@ type LoRASpec struct {
 	MaxCpuAdapters *int32 `json:"maxCpuAdapters,omitempty"`
 }
 
+// LocalModelCacheSpec configures an Instance-owned KServe
+// LocalModelNamespaceCache for the base model.
+type LocalModelCacheSpec struct {
+	// Enabled creates and maintains the cache.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ModelSize is the storage required for one model copy, for example "10Gi".
+	ModelSize string `json:"modelSize,omitempty"`
+
+	// NodeGroup names the existing LocalModelNodeGroup that stores the model.
+	NodeGroup string `json:"nodeGroup,omitempty"`
+
+	// ServiceAccountName optionally names the download ServiceAccount in the
+	// KServe LocalModel jobs namespace.
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
 // VllmCustomSpec defines custom configuration for the vllm component type,
 // which is rendered into a KServe LLMInferenceService (serving.kserve.io/v1alpha2).
 type VllmCustomSpec struct {
@@ -48,6 +65,10 @@ type VllmCustomSpec struct {
 	// ModelName is the name advertised in the "model" field of inference requests.
 	// Defaults to the Instance name when empty.
 	ModelName string `json:"modelName,omitempty"`
+
+	// LocalModelCache creates a namespace-scoped cache for ModelURI. The node
+	// group and optional download ServiceAccount must already exist.
+	LocalModelCache *LocalModelCacheSpec `json:"localModelCache,omitempty"`
 
 	// TensorParallelSize configures vLLM tensor parallelism (maps to the runtime
 	// --tensor-parallel-size). Use for models that span multiple GPUs on a node.

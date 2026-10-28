@@ -108,7 +108,7 @@ helm install provider-kserve \
   --set kserveResources.kserve.localmodel.enabled=true
 ```
 
-See [Cache model weights on nodes](docs/local-model-cache.md) for node preparation, credentials, and cache resources.
+See [Cache model weights on nodes](docs/local-model-cache.md) for node preparation, credentials, and the provider-driven Instance cache form.
 
 Add the AI Gateway and multi-node (LeaderWorkerSet) support in the same command:
 
@@ -202,7 +202,7 @@ Complete manifests live in [examples/](examples/):
 - [examples/instance-llm-cpu.yaml](examples/instance-llm-cpu.yaml) — a small model on CPU
   (compute profile, KV cache sizing, inline advanced config).
 - [examples/instance-predictor.yaml](examples/instance-predictor.yaml) — an sklearn model.
-- [examples/local-model-cache.yaml](examples/local-model-cache.yaml), a node group, namespace cache, and matching CPU model.
+- [examples/local-model-cache.yaml](examples/local-model-cache.yaml), a node group and CPU model with a provider-managed namespace cache.
 
 Watch it come up and read the connection details:
 

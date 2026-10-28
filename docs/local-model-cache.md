@@ -45,7 +45,8 @@ kubectl -n everest-system get daemonset kserve-localmodelnode-agent \
 
 KServe v0.21 currently renders `/models`. Do not use the container mount path `/mnt/models` in the node group.
 
-Apply the complete public-model example:
+Apply the complete public-model example. It creates the node group and an
+Instance whose provider-managed namespace cache is enabled:
 
 ```bash
 kubectl apply -f examples/local-model-cache.yaml
@@ -76,24 +77,53 @@ secrets:
   - name: hf-secret
 ```
 
-Set `spec.serviceAccountName: hf-downloader` on the cache. Do not copy Instance namespace Secrets into the job namespace automatically.
+Set `llmEngine.parameters.localModelCache.serviceAccountName` to
+`hf-downloader` on the Instance. The provider writes that reference to the
+cache. It does not copy Instance namespace Secrets into the job namespace.
 
-## Create caches
+## Configure an Instance cache
 
-Use `LocalModelNamespaceCache` unless several namespaces must share one cache. It limits cache use to one namespace.
+The provider definition adds a Model Cache section to the LLM Instance form.
+Enable it and set:
 
-The cache URI must match the Instance model URI. KServe admission adds cache labels and rewrites the workload to the cached PVC.
+- Model size: storage required for one model copy.
+- LocalModelNodeGroup: an existing cluster-scoped node group.
+- Download service account: optional credentials reference.
 
-Do not set `disableStorageInitializer: true` on the Instance. KServe performs the cache rewrite inside the storage initialization path.
+The equivalent Instance YAML is:
 
-The first cache population still downloads the model. Later Pods reuse the node-local copy.
+```yaml
+spec:
+  components:
+    llmEngine:
+      parameters:
+        modelURI: hf://HuggingFaceTB/SmolLM2-135M-Instruct
+        localModelCache:
+          enabled: true
+          modelSize: 1Gi
+          nodeGroup: model-workers
+          serviceAccountName: hf-downloader
+```
+
+The provider creates a `LocalModelNamespaceCache` in the Instance namespace.
+Its name matches the Instance name, and the Instance owns it. Disable the form
+toggle to remove the cache and recreate the workload without cache admission.
+
+The cache URI always matches the Instance model URI. KServe admission adds
+cache labels and rewrites the workload to the cached PVC.
+
+Do not set `disableStorageInitializer: true` on the Instance. KServe performs
+the cache rewrite inside the storage initialization path.
+
+The first cache population still downloads the model. Later Pods reuse the
+node-local copy.
 
 ## Check cache state
 
 Inspect the cache:
 
 ```bash
-kubectl -n models get localmodelnamespacecache smollm2-135m -o yaml
+kubectl -n models get localmodelnamespacecache smollm2-cached -o yaml
 ```
 
 Check the Instance message:
@@ -106,7 +136,7 @@ kubectl -n models get instance smollm2-cached \
 A populated cache reports a message such as:
 
 ```text
-Model cache "smollm2-135m": 1/1 nodes ready
+Model cache "smollm2-cached": 1/1 nodes ready
 ```
 
 Verify that the admitted service uses the cache:
@@ -124,8 +154,11 @@ kubectl -n models get pod -l app.kubernetes.io/name=smollm2-cached -o yaml
 
 ## Capacity and deletion
 
-`spec.modelSize` reserves capacity. Each selected node stores one full model copy.
+`spec.modelSize` reserves capacity. Each selected node stores one full model
+copy. The provider refuses zero or invalid sizes.
 
-Do not delete a cache while an Instance uses it. KServe rejects deletion when it finds a matching serving resource.
+Disable the Instance cache before removing its node group. Deleting the
+Instance also deletes its namespace cache through the owner reference.
 
-Node replacement removes that node's local copy. KServe downloads the model again on the replacement node.
+Node replacement removes that node's local copy. KServe downloads the model
+again on the replacement node.

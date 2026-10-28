@@ -78,7 +78,9 @@ As an ML engineer, I want large weights cached on selected nodes. New replicas
 can then start without downloading the same model again.
 
 Acceptance criteria
-- An administrator can manage node groups and namespace caches in the OpenEverest UI.
+- An administrator prepares LocalModel node groups with Kubernetes YAML.
+- An ML engineer enables and manages an Instance namespace cache in the
+  provider-driven OpenEverest form.
 - Kubernetes YAML and GitOps remain supported.
 - KServe matches the Instance model URI to a cache automatically.
 - The Instance status shows available, total, and failed node copies.
@@ -93,21 +95,30 @@ kserveResources:
       enabled: true
 
 ---
-apiVersion: serving.kserve.io/v1alpha1
-kind: LocalModelNamespaceCache
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
 metadata:
   name: qwen3-4b
   namespace: models
 spec:
-  sourceModelUri: hf://Qwen/Qwen3-4B
-  modelSize: 10Gi
-  nodeGroups:
-    - model-workers
+  providerRef:
+    name: provider-kserve
+  topology:
+    type: llm
+  components:
+    llmEngine:
+      type: vllm
+      parameters:
+        modelURI: hf://Qwen/Qwen3-4B
+        localModelCache:
+          enabled: true
+          modelSize: 10Gi
+          nodeGroup: model-workers
 ```
 
-The Instance uses the same `modelURI`. Leave `disableStorageInitializer`
-unset. KServe uses the storage initialization path to replace the URI with the
-cached PVC.
+The provider creates and owns the `LocalModelNamespaceCache`. Leave
+`disableStorageInitializer` unset. KServe uses the storage initialization path
+to replace the URI with the cached PVC.
 
 See `docs/local-model-cache.md` and `examples/local-model-cache.yaml`.
 

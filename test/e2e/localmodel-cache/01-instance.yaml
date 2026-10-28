@@ -19,3 +19,7 @@ spec:
         modelURI: hf://HuggingFaceTB/SmolLM2-135M-Instruct
         modelName: smollm2-135m-instruct
         computeProfile: cpu
+        localModelCache:
+          enabled: true
+          modelSize: 1Gi
+          nodeGroup: localmodel-e2e

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
@@ -242,6 +245,206 @@ func llmContext(t *testing.T, replicas *int32, params components.VllmCustomSpec,
 		},
 	}
 	return controller.NewContext(context.Background(), nil, inst, common.ProviderName)
+}
+
+func TestValidateLLMLocalModelCache(t *testing.T) {
+	valid := components.LocalModelCacheSpec{
+		Enabled:   true,
+		ModelSize: "2Gi",
+		NodeGroup: "model-workers",
+	}
+	cases := []struct {
+		name         string
+		chartEnabled string
+		cache        components.LocalModelCacheSpec
+		disableSI    bool
+		wantErr      string
+	}{
+		{name: "chart disabled", cache: valid, wantErr: "requires kserveResources.kserve.localmodel.enabled"},
+		{name: "missing size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, NodeGroup: "model-workers"}, wantErr: "modelSize is required"},
+		{name: "invalid size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "large", NodeGroup: "model-workers"}, wantErr: "modelSize"},
+		{name: "zero size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "0", NodeGroup: "model-workers"}, wantErr: "greater than zero"},
+		{name: "missing node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "2Gi"}, wantErr: "nodeGroup is required"},
+		{name: "invalid node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "2Gi", NodeGroup: "Not_Valid"}, wantErr: "nodeGroup"},
+		{name: "storage initializer disabled", chartEnabled: "true", cache: valid, disableSI: true, wantErr: "disableStorageInitializer must remain false"},
+		{name: "valid", chartEnabled: "true", cache: valid},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LOCAL_MODEL_ENABLED", tc.chartEnabled)
+			params := components.VllmCustomSpec{LocalModelCache: &tc.cache}
+			if tc.disableSI {
+				params.DisableStorageInitializer = ptr.To(true)
+			}
+			err := validateLLM(llmContext(t, nil, params, llm.LlmTopologyParameters{}))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateLLM() error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSyncLocalModelCache(t *testing.T) {
+	t.Setenv("LOCAL_MODEL_ENABLED", "true")
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kservev1alpha2.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	params := components.VllmCustomSpec{
+		ModelURI: "hf://org/model",
+		LocalModelCache: &components.LocalModelCacheSpec{
+			Enabled:            true,
+			ModelSize:          "2Gi",
+			NodeGroup:          "model-workers",
+			ServiceAccountName: "model-puller",
+		},
+	}
+	inst := llmContext(t, nil, params, llm.LlmTopologyParameters{}).Instance()
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	c := controller.NewContext(context.Background(), cl, inst, common.ProviderName)
+
+	ready, err := syncLocalModelCache(c, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("new cache should be ready for workload reconciliation")
+	}
+	cache := unstructuredObject(localModelNamespaceCacheGVK)
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); err != nil {
+		t.Fatal(err)
+	}
+	spec, found, err := unstructured.NestedMap(cache.Object, "spec")
+	if err != nil || !found {
+		t.Fatalf("cache spec not found: found=%v err=%v", found, err)
+	}
+	if got := spec["sourceModelUri"]; got != "hf://org/model" {
+		t.Fatalf("sourceModelUri = %#v", got)
+	}
+	if got := spec["modelSize"]; got != "2Gi" {
+		t.Fatalf("modelSize = %#v", got)
+	}
+	if got := spec["nodeGroups"]; !slices.Equal(got.([]any), []any{"model-workers"}) {
+		t.Fatalf("nodeGroups = %#v", got)
+	}
+	if got := spec["serviceAccountName"]; got != "model-puller" {
+		t.Fatalf("serviceAccountName = %#v", got)
+	}
+	if len(cache.GetOwnerReferences()) != 1 || cache.GetOwnerReferences()[0].Name != "llama" {
+		t.Fatalf("ownerReferences = %#v", cache.GetOwnerReferences())
+	}
+	llmisvc := &kservev1alpha2.LLMInferenceService{ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "ns"}}
+	if err := cl.Create(context.Background(), llmisvc); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := params
+	disabled.LocalModelCache = nil
+	ready, err = syncLocalModelCache(c, disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("workload removal should defer cache reconciliation")
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); err != nil {
+		t.Fatalf("cache should remain until the workload is gone: %v", err)
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, llmisvc); !apierrors.IsNotFound(err) {
+		t.Fatalf("workload after disabling cache: %v", err)
+	}
+
+	ready, err = syncLocalModelCache(c, disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("cache removal should defer workload reconciliation")
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); !apierrors.IsNotFound(err) {
+		t.Fatalf("cache after disable: %v", err)
+	}
+	ready, err = syncLocalModelCache(c, disabled)
+	if err != nil || !ready {
+		t.Fatalf("disabled cache after cleanup: ready=%v err=%v", ready, err)
+	}
+}
+
+func TestSyncLocalModelCacheReplacesImmutableURI(t *testing.T) {
+	t.Setenv("LOCAL_MODEL_ENABLED", "true")
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kservev1alpha2.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := unstructuredObject(localModelNamespaceCacheGVK)
+	cache.SetName("llama")
+	cache.SetNamespace("ns")
+	cache.Object["spec"] = map[string]any{
+		"sourceModelUri": "hf://org/old",
+		"modelSize":      "1Gi",
+		"nodeGroups":     []any{"model-workers"},
+	}
+	llmisvc := &kservev1alpha2.LLMInferenceService{ObjectMeta: metav1.ObjectMeta{Name: "llama", Namespace: "ns"}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cache, llmisvc).Build()
+	params := components.VllmCustomSpec{
+		ModelURI: "hf://org/new",
+		LocalModelCache: &components.LocalModelCacheSpec{
+			Enabled:   true,
+			ModelSize: "2Gi",
+			NodeGroup: "model-workers",
+		},
+	}
+	inst := llmContext(t, nil, params, llm.LlmTopologyParameters{}).Instance()
+	c := controller.NewContext(context.Background(), cl, inst, common.ProviderName)
+
+	ready, err := syncLocalModelCache(c, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("immutable URI replacement should wait for the next reconcile")
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); err != nil {
+		t.Fatalf("cache should remain until the workload is gone: %v", err)
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, llmisvc); !apierrors.IsNotFound(err) {
+		t.Fatalf("workload after URI change: %v", err)
+	}
+	ready, err = syncLocalModelCache(c, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready {
+		t.Fatal("cache removal should defer workload reconciliation")
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); !apierrors.IsNotFound(err) {
+		t.Fatalf("cache after URI change: %v", err)
+	}
+	ready, err = syncLocalModelCache(c, params)
+	if err != nil || !ready {
+		t.Fatalf("replacement cache: ready=%v err=%v", ready, err)
+	}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: "llama", Namespace: "ns"}, cache); err != nil {
+		t.Fatal(err)
+	}
+	sourceURI, _, err := unstructured.NestedString(cache.Object, "spec", "sourceModelUri")
+	if err != nil || sourceURI != "hf://org/new" {
+		t.Fatalf("replacement sourceModelUri=%q err=%v", sourceURI, err)
+	}
 }
 
 func TestValidateWorkloadScaling(t *testing.T) {

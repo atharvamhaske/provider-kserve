@@ -3,7 +3,7 @@ kind: LLMInferenceService
 metadata:
   name: cached-smollm
   labels:
-    internal.serving.kserve.io/localmodel: smollm2-135m
+    internal.serving.kserve.io/localmodel: cached-smollm
   annotations:
     internal.serving.kserve.io/localmodel-sourceuri: hf://HuggingFaceTB/SmolLM2-135M-Instruct
 spec:

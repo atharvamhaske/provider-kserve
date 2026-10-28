@@ -32,6 +32,9 @@ func New() *Provider {
 		controller.WatchOwned(unstructuredObject(inferenceServiceGVK)),
 		controller.WatchOwned(&corev1.Service{}),
 	}
+	if common.LocalModelEnabled() {
+		watches = append(watches, controller.WatchOwned(unstructuredObject(localModelNamespaceCacheGVK)))
+	}
 	if common.AIGatewayEnabled() {
 		watches = append(watches,
 			controller.WatchOwned(unstructuredObject(aiGatewayRouteGVK)),
@@ -116,6 +119,14 @@ func (p *Provider) Cleanup(c *controller.Context) error {
 	case common.TopologyLLM:
 		if err := c.Delete(&kservev1alpha2.LLMInferenceService{ObjectMeta: c.ObjectMeta(c.Name())}); err != nil {
 			return err
+		}
+		if common.LocalModelEnabled() {
+			cache := unstructuredObject(localModelNamespaceCacheGVK)
+			cache.SetName(c.Name())
+			cache.SetNamespace(c.Namespace())
+			if err := c.Delete(cache); err != nil {
+				return err
+			}
 		}
 		// The inline Advanced config is owner-ref garbage-collected; delete it
 		// explicitly too (no-op when absent).

@@ -135,7 +135,6 @@
   resources:
     - clusterstoragecontainers
     - localmodelcaches
-    - localmodelnamespacecaches
   verbs:
     - get
     - list
@@ -146,6 +145,7 @@
     - inferenceservices
     - llminferenceserviceconfigs
     - llminferenceservices
+    - localmodelnamespacecaches
   verbs:
     - create
     - delete

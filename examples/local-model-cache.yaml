@@ -41,17 +41,6 @@ spec:
                 values:
                   - worker
 ---
-apiVersion: serving.kserve.io/v1alpha1
-kind: LocalModelNamespaceCache
-metadata:
-  name: smollm2-135m
-  namespace: models
-spec:
-  sourceModelUri: hf://HuggingFaceTB/SmolLM2-135M-Instruct
-  modelSize: 1Gi
-  nodeGroups:
-    - model-workers
----
 apiVersion: core.openeverest.io/v1alpha1
 kind: Instance
 metadata:
@@ -75,3 +64,7 @@ spec:
         modelName: smollm2-135m-instruct
         computeProfile: cpu
         # Leave disableStorageInitializer unset. KServe uses that path to mount the cache.
+        localModelCache:
+          enabled: true
+          modelSize: 1Gi
+          nodeGroup: model-workers
