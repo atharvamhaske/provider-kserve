@@ -1,0 +1,53 @@
+# Example Instance CR for the provider-kserve provider (llm topology, OCI model image).
+#
+# Serves a model packaged as a container image instead of downloading it from
+# Hugging Face or S3. The kubelet pulls the image once per node and caches it,
+# so restarts, rollouts and new replicas on that node start without a download.
+#
+#   - oci://          modelcar: the image runs as an init container + sidecar.
+#                     Works on any cluster with KServe's enableModelcar (on in
+#                     the bundled KServe chart).
+#   - oci+native://   Kubernetes image volume: mounted read-only, no extra
+#                     containers. Needs Kubernetes 1.36+ (or 1.34+ with the
+#                     ImageVolume feature gate) and a supporting runtime.
+#
+# The image must hold the model files under /models. See "OCI model images" in
+# the README for building one.
+#
+# Prerequisites:
+#   1. OpenEverest CRDs installed
+#   2. Provider CR applied (definition/provider.yaml)
+#   3. KServe installed with the LLMInferenceService (v1alpha2) CRD
+#   4. Provider controller running
+#   5. A GPU node (the default compute profile)
+apiVersion: core.openeverest.io/v1alpha1
+kind: Instance
+metadata:
+  name: granite-oci
+  namespace: default
+spec:
+  providerRef:
+    name: provider-kserve
+
+  topology:
+    type: llm
+
+  components:
+    llmEngine:
+      type: vllm
+      replicas: 1
+      resources:
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      parameters:
+        # Public image from Red Hat's modelcar catalog (Apache-2.0 model).
+        modelURI: oci://quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct
+        modelName: granite-3.3-2b
+        gpuCount: 1
+
+        # For a private registry: a docker-registry Secret in this namespace.
+        #   kubectl create secret docker-registry registry-pull \
+        #     --docker-server=registry.example.com \
+        #     --docker-username=<user> --docker-password=<token>
+        # imagePullSecret: registry-pull

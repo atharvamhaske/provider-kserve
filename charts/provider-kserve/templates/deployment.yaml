@@ -97,6 +97,12 @@ spec:
               value: {{ .Values.predictorModels | toJson | quote }}
             - name: STORAGE_INITIALIZER_RESOURCES
               value: {{ .Values.storageInitializer.resources | toJson | quote }}
+            # KServe's system namespace: the chart renders the shared
+            # LLMInferenceServiceConfig presets into the release namespace.
+            - name: KSERVE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

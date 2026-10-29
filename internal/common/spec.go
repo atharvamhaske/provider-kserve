@@ -55,7 +55,17 @@ const (
 	localModelEnabledEnvVar  = "LOCAL_MODEL_ENABLED"
 
 	storageInitializerResourcesEnvVar = "STORAGE_INITIALIZER_RESOURCES"
+
+	// kserveNamespaceEnvVar names KServe's system namespace, where the chart
+	// renders the shared LLMInferenceServiceConfig presets. KServe resolves a
+	// baseRef there when the Instance's namespace has no config of that name.
+	kserveNamespaceEnvVar = "KSERVE_NAMESPACE"
 )
+
+// KServeNamespace returns KServe's system namespace, or "" when not configured.
+func KServeNamespace() string {
+	return os.Getenv(kserveNamespaceEnvVar)
+}
 
 // HFTokenSecretName returns the configured HuggingFace token Secret name, or an
 // empty string when gated-model support is disabled. The Secret must contain an

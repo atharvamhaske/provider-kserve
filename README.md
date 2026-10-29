@@ -79,8 +79,7 @@ provider itself is covered under [Installation](#installation).
 | TLS | ✅ | optional HTTPS on the shared Envoy AI Gateway, issued by cert-manager |
 | Node-local model cache | ✅ | optional KServe LocalModel controller; see [Cache model weights on nodes](docs/local-model-cache.md) |
 
-By default, model Pods pull from the component URI (`hf://`, `s3://`, `gs://`, or `pvc://`).
-The optional KServe LocalModel controller can pre-populate node-local PVs and reuse them across Pod starts.
+Models are pulled from the URI given in the component parameters (`hf://`, `s3://`, `pvc://`, and container images via `oci://`; `predictor` also takes `gs://` and the other storage URIs KServe supports). The provider does not manage persistent volumes directly. For repeated LLM starts, the optional KServe LocalModel controller can pre-populate node-local PVs and reuse them across Pods.
 
 ## Installation
 
@@ -253,7 +252,7 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 
 | Field | Type | Description |
 |---|---|---|
-| `modelURI` | string | Model artifacts location (`hf://`, `s3://`, `gs://`, `pvc://`). **Required.** |
+| `modelURI` | string | Model artifacts location: `hf://`, `s3://`, `pvc://`, or a model image via `oci://` / `oci+native://` (see [OCI model images](#oci-model-images)). Other schemes are rejected. **Required.** |
 | `modelName` | string | Name advertised in the request `model` field. Defaults to the Instance name. |
 | `tensorParallelSize` | int32 | vLLM tensor parallelism (`--tensor-parallel-size`). When `nvidia.com/gpu` is set on the head (or workers), the GPU count must be ≥ this value. Skipped on CPU / no GPU key. |
 | `pipelineParallelSize` | int32 | vLLM pipeline parallelism (`--pipeline-parallel-size`). When `workerCount` is set this must equal `workerCount + 1`. Alone it does not create worker pods. |
@@ -263,9 +262,11 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `expertParallel` | string | `enabled` / `disabled` (default) expert parallelism (`ParallelismSpec.expert`) for MoE models (Mixtral, DeepSeek, Qwen-MoE). |
 | `computeProfile` | string | `gpu` (default) uses the bundled CUDA presets; `cpu` composes the CPU-only `kserve-config-llm-cpu` config via `baseRefs`. See [Compute profile](#compute-profile-cpu-serving). |
 | `kvCacheSpaceGi` | int32 | Caps `VLLM_CPU_KVCACHE_SPACE` on the CPU profile. |
+| `engine` | object | vLLM engine flags: context length, memory, precision, tool calling, reasoning. See [Engine tuning](#engine-tuning). |
 | `baseRefs` | []string | `LLMInferenceServiceConfig` names to inherit/merge. |
 | `config` | string | Inline `LLMInferenceServiceConfig` spec body. See [Advanced customization](#advanced-customization-inline-config). |
-| `disableStorageInitializer` | bool | Skip the storage-initializer init container. |
+| `disableStorageInitializer` | bool | Skip the step that makes the model available to vLLM; the model must already be at `/mnt/models`. Not allowed with `oci://` / `oci+native://` models. |
+| `imagePullSecret` | string | Secret in the Instance namespace for pulling from a private registry, typically an [OCI model image](#oci-model-images). Set on head, worker and prefill pods. |
 | `minReplicas` | int32 | Decode WVA autoscaling floor (≥ 1). Setting `minReplicas` or `maxReplicas` enables `LLMInferenceService.spec.scaling` and ignores `llmEngine.replicas`. |
 | `maxReplicas` | int32 | Decode WVA autoscaling ceiling. Required when decode autoscaling is enabled. |
 | `scalingActuator` | string | WVA actuator: `keda` (default) or `hpa`. KEDA queries Prometheus directly; HPA needs a Prometheus Adapter. |
@@ -722,6 +723,58 @@ models will then download.
 > its own workload `ServiceAccount` and ignores the provider's, so the token is not injected
 > in that combination. Gated downloads without gateway routing work as described.
 
+#### OCI model images
+
+Package the model weights as a container image and set `modelURI` to `oci://registry/repo:tag`.
+The kubelet pulls it like any other image: once per node, then from that node's image cache. A
+restart, a rollout or a new replica on a node that already has the image skips the download,
+which for multi-GB weights is most of the cold start. Nothing is downloaded into the pod, and the
+storage-initializer is not used.
+
+| URI | How KServe mounts the image | Requirements |
+|---|---|---|
+| `oci://` | **Modelcar**: the image runs as an init container and a sidecar, and vLLM reads the weights through a shared process namespace. KServe runs the vLLM container as uid 1010 (`uidModelcar`). | `enableModelcar` in KServe's `inferenceservice-config` (on in the bundled KServe chart). The image needs a shell (`sh`). |
+| `oci+native://` | **Image volume**: Kubernetes mounts the image read-only at `/mnt/models`. No extra containers, and the vLLM container keeps its user. | Kubernetes 1.36+ (image volumes are GA), or 1.34+ with the `ImageVolume` feature gate on, and a runtime that supports image volumes (e.g. containerd 2.1+). |
+
+Prefer `oci+native://` where the cluster supports it; `oci://` works everywhere. Both read the
+weights from `/models` inside the image. To build one:
+
+```dockerfile
+# hf download Qwen/Qwen3-0.6B --local-dir model
+FROM busybox
+COPY model/ /models/
+```
+
+```yaml
+components:
+  llmEngine:
+    parameters:
+      modelURI: oci+native://registry.example.com/models/qwen3-0.6b:v1
+      imagePullSecret: registry-pull   # only for a private registry
+```
+
+The model catalog ships a few public images from Red Hat's
+[modelcar catalog](https://quay.io/repository/redhat-ai-services/modelcar-catalog) (marked
+"OCI image"); add your own as `uri: oci://...` entries. For a private registry, create a pull
+secret in the Instance namespace and set **Image pull secret** (`imagePullSecret`):
+
+```bash
+kubectl -n <namespace> create secret docker-registry registry-pull \
+  --docker-server=registry.example.com --docker-username=<user> --docker-password=<token>
+```
+
+Things to know:
+
+- `disableStorageInitializer` must stay off: KServe attaches the image in that step, so the
+  provider rejects the combination instead of starting vLLM without a model.
+- The first pull on each node still takes as long as a download. Large images also take node
+  disk; the kubelet's image garbage collection removes them when they are no longer used.
+- LoRA adapters are not part of the image. `hf://` and `s3://` adapters are still downloaded by
+  the storage-initializer.
+- `oci+modelcar://` is not supported for `llm`; use `oci://`.
+
+See [examples/instance-llm-oci.yaml](examples/instance-llm-oci.yaml).
+
 ### Compute profile (CPU serving)
 
 The bundled `LLMInferenceServiceConfig` presets use a CUDA (GPU) vLLM image. To serve a model
@@ -770,10 +823,20 @@ cpuProfile:
     - --max-model-len=2048           # smaller context = smaller KV arena
 ```
 
-These flow into the vLLM command as container args. To override them for a single instance,
-set `args` on the `main` container in the topology's **Advanced** (inline
-`LLMInferenceServiceConfig`) section — KServe treats a container's `args` as atomic, so your
-list **replaces** the preset defaults entirely (re-specify any you still want):
+These flow into the vLLM command as container args. To change one of them for a single
+instance, set the matching [Engine Tuning](#engine-tuning) field: it is appended after the
+defaults and wins, and the other defaults stay.
+
+```yaml
+engine:
+  gpuMemoryUtilization: 0.5
+  maxModelLen: 4096
+```
+
+To drop a default instead (say `--enforce-eager`), set `args` on the `main` container in the
+topology's **Advanced** (inline `LLMInferenceServiceConfig`) section — KServe treats a
+container's `args` as atomic, so your list **replaces** the preset defaults entirely
+(re-specify any you still want):
 
 ```yaml
 config: |
@@ -781,8 +844,8 @@ config: |
     containers:
       - name: main
         args:
-          - --gpu-memory-utilization=0.5
-          - --max-model-len=4096
+          - --gpu-memory-utilization=0.3
+          - --max-model-len=2048
 ```
 
 Set **CPU KV Cache Space** (`parameters.kvCacheSpaceGi`) only to additionally cap
@@ -940,12 +1003,51 @@ The image runs with the permissions of the Instance namespace, like any pod. Res
 Instance authors may run with [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
 or an admission policy on the namespace.
 
+### Engine tuning
+
+`llmEngine.parameters.engine` exposes the vLLM settings people change most, as the **Engine
+Tuning** section in the UI. Each set field becomes one `vllm serve` flag; empty fields keep
+vLLM's defaults.
+
+| Field | vLLM flag | Notes |
+|---|---|---|
+| `maxModelLen` | `--max-model-len` | Context length in tokens. Lowering it is the usual fix when the model does not fit in GPU memory. |
+| `gpuMemoryUtilization` | `--gpu-memory-utilization` | Fraction in (0, 1] of GPU memory vLLM may claim. Host memory on the CPU profile. |
+| `maxNumSeqs` | `--max-num-seqs` | Sequences batched per iteration. |
+| `dtype` | `--dtype` | `auto`, `half`, `float16`, `bfloat16`, `float` or `float32`. |
+| `quantization` | `--quantization` | e.g. `fp8` or `bitsandbytes` to quantize on load. Leave empty for pre-quantized checkpoints. |
+| `kvCacheDtype` | `--kv-cache-dtype` | e.g. `fp8` to fit about twice the tokens. |
+| `toolCallParser` | `--enable-auto-tool-choice --tool-call-parser` | Turns on OpenAI tool calling. Match the model: `hermes` (Qwen), `llama3_json`, `mistral`, `openai` (gpt-oss), … |
+| `reasoningParser` | `--reasoning-parser` | Returns thinking in `reasoning_content`: `qwen3`, `deepseek_r1`, `openai_gptoss`, … |
+
+```yaml
+components:
+  llmEngine:
+    parameters:
+      modelURI: hf://Qwen/Qwen3-8B
+      engine:
+        maxModelLen: 16384
+        kvCacheDtype: fp8
+        toolCallParser: hermes
+        reasoningParser: qwen3
+```
+
+The UI lists the common values; the API accepts any single-word value, so new vLLM
+quantization methods and parsers work without a provider release.
+
+The flags apply to every vLLM pod: head, workers and prefill. They are appended after the args
+the pods already get from the compute-profile preset, `baseRefs` and the [inline
+config](#advanced-customization-inline-config), and vLLM keeps the last value of a repeated
+flag, so the engine fields win. The provider carries the inherited args over because setting
+`args` on the `LLMInferenceService` replaces the list it would inherit: the CPU profile keeps
+its defaults (`--enforce-eager`, …) when you set, say, `maxModelLen`.
+
 ### Advanced customization (inline config)
 
-The structured fields cover the common knobs (model, resources, parallelism, KV cache). For
-anything else — extra vLLM args, environment variables, scheduling — use the **Advanced**
-section (`llmEngine.parameters.config`) to author an inline `LLMInferenceServiceConfig` **spec
-body**:
+The structured fields cover the common knobs (model, resources, parallelism, KV cache, [engine
+flags](#engine-tuning)). For anything else — other vLLM args, environment variables,
+scheduling — use the **Advanced** section (`llmEngine.parameters.config`) to author an inline
+`LLMInferenceServiceConfig` **spec body**:
 
 ```yaml
 components:
@@ -957,15 +1059,15 @@ components:
             - name: main
               args:
                 - --enforce-eager      # skip torch.compile (lowers CPU memory)
-                - --max-model-len=2048 # cap context length (shrinks KV cache)
+                - --enable-prefix-caching
 ```
 
 On reconcile the provider materializes this as an `LLMInferenceServiceConfig` named
 `<instance>-config` in the Instance's namespace, owned by the Instance (so it is
 garbage-collected with it), and attaches it to the `LLMInferenceService` via `baseRefs`. It is
 applied **last**, so it overrides the compute-profile preset and any `baseRefs` you set, while
-the Instance's own structured fields (model, resources, the derived KV cache env) still win
-over it. Enter only the config spec body — the provider supplies the metadata.
+the Instance's own structured fields (model, resources, the derived KV cache env, engine flags)
+still win over it. Enter only the config spec body — the provider supplies the metadata.
 
 To reference *pre-existing* shared configs instead of authoring one inline, list their names in
 `llmEngine.parameters.baseRefs` (API-only).
@@ -990,7 +1092,7 @@ external address across different environments:
 is 1 CPU / 1Gi) sets the resources of the init container that downloads `hf://` / `s3://`
 models for every `llm` Instance, and of the bundled `default` ClusterStorageContainer that
 downloads `predictor` models. Raise the memory limit when multi-GB downloads are OOM-killed;
-at 1Gi a 1.2 GB model already is.
+at 1Gi a 1.2 GB model already is. [OCI model images](#oci-model-images) skip this download.
 
 GPU `llm` Instances roll out with `rolloutStrategy: {maxSurge: 0, maxUnavailable: 1}`: pods are
 replaced one at a time without a surge pod, which would wait for a GPU still held by the pod it

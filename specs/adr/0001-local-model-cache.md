@@ -67,8 +67,6 @@ The provider enforces tenant authorization for every referenced download Service
 
 18. Unit tests cover validation, create and apply, immutable-URI replacement, disable and chart-disable cleanup, staged Instance cleanup, owner rejection, credential authorization, and status messages. Helm tests cover disabled and enabled renders. The end-to-end test proves PVC admission, pod reuse without another download Job, status propagation, and clean disable.
 
-19. CI pins Helm `v4.1.3` for build, chart tests, and generated-file verification. Helm versions render different blank-line whitespace around YAML document separators, so one pinned renderer is required for reproducible vendored KServe manifests.
-
 ## Security boundary
 
 The upstream `kserve-localmodelnode-agent-role` is a `ClusterRole` bound with a `ClusterRoleBinding`. It grants `get`, `list`, and `watch` on Secrets and ServiceAccounts in every namespace. It grants cluster-wide create, update, patch, and delete on Jobs.

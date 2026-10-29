@@ -182,3 +182,35 @@ zone, taints), so that expensive accelerators are used correctly.
 
 **Provider mapping (interim)** — express placement through inline `config` /
 `baseRefs` until first-class scheduling fields exist.
+
+---
+
+## 3.9 Tune the vLLM engine and turn on tool calling
+
+**Status:** Supported (`llm`)
+
+As an MLOps engineer, I want to set the vLLM flags I change most (context
+length, memory, precision, tool calling, reasoning) without writing YAML, so
+that a model fits the GPU I have and works with agent frameworks.
+
+**Acceptance criteria**
+- Context length, GPU memory share, batch size, dtype, quantization and KV cache
+  dtype map to their `vllm serve` flags.
+- A tool-call parser turns on OpenAI tool calling; a reasoning parser splits
+  thinking into `reasoning_content`.
+- The flags reach every vLLM pod (head, workers, prefill) and win over the same
+  flags from presets and the inline config, without dropping the other args
+  those set.
+
+**Provider mapping** — the **Engine Tuning** section, or
+`llmEngine.parameters.engine`:
+```yaml
+components:
+  llmEngine:
+    parameters:
+      engine:
+        maxModelLen: 16384
+        kvCacheDtype: fp8
+        toolCallParser: hermes
+        reasoningParser: qwen3
+```

@@ -16,11 +16,15 @@ its adapters, and how it gets onto the node.
 
 **Status:** Supported (both)
 
-As an ML engineer, I want to point serving at an exact model in HF, S3, GCS, or
-a PVC, so that I can ship the fine-tune I just produced.
+As an ML engineer, I want to point serving at an exact model in HF, S3, a PVC or
+a container image (plus GCS and other stores for `predictor`), so that I can ship
+the fine-tune I just produced.
 
 **Acceptance criteria**
-- `hf://`, `s3://`, `gs://`, `pvc://` (and `oci://` for predictor) are accepted.
+- `llm`: `hf://`, `s3://`, `pvc://`, `oci://` and `oci+native://` are accepted;
+  other schemes are rejected up front.
+- `predictor`: `hf://`, `s3://`, `gs://`, `pvc://`, `oci://` and the other
+  KServe storage URIs are accepted.
 - A pinned revision/path resolves to that exact artifact.
 
 **Provider mapping**
@@ -72,21 +76,35 @@ See `examples/instance-llm-lora.yaml`.
 
 ## 2.3 Pre-pull / cache model weights on nodes
 
-Status: Supported with the optional KServe LocalModel controller.
+Status: Supported through OCI model images and the optional KServe LocalModel controller.
 
 As an ML engineer, I want large weights cached on selected nodes. New replicas
 can then start without downloading the same model again.
 
 Acceptance criteria
+- A model can be cached on nodes through an OCI model image or `LocalModelNamespaceCache`.
+- A restart, rollout, or new replica on a node that has the model does not download it again.
 - An administrator prepares LocalModel node groups with Kubernetes YAML.
-- An ML engineer enables and manages an Instance namespace cache in the
-  provider-driven OpenEverest form.
+- An ML engineer enables and manages an Instance namespace cache in the provider-driven OpenEverest form.
 - Kubernetes YAML and GitOps remain supported.
 - KServe matches the Instance model URI to a cache automatically.
 - The Instance status shows available, total, and failed node copies.
 - A cached model Pod mounts the cache PVC without a storage-initializer container.
 
 Provider mapping
+
+For OCI model images, package the model as an image. See "OCI model images" in the README and `examples/instance-llm-oci.yaml`.
+
+```yaml
+components:
+  llmEngine:
+    parameters:
+      modelURI: oci+native://registry.example.com/models/qwen3-8b:v1  # or oci://
+      imagePullSecret: registry-pull   # private registry only
+```
+
+For KServe LocalModel caching, enable the chart feature and configure the Instance cache.
+
 ```yaml
 # Helm values
 kserveResources:
@@ -116,9 +134,7 @@ spec:
           nodeGroup: model-workers
 ```
 
-The provider creates and owns the `LocalModelNamespaceCache`. Leave
-`disableStorageInitializer` unset. KServe uses the storage initialization path
-to replace the URI with the cached PVC.
+The provider creates and owns the `LocalModelNamespaceCache`. Leave `disableStorageInitializer` unset. KServe uses the storage initialization path to replace the URI with the cached PVC. It must remain disabled only for OCI images.
 
 See `docs/local-model-cache.md` and `examples/local-model-cache.yaml`.
 
@@ -126,17 +142,20 @@ See `docs/local-model-cache.md` and `examples/local-model-cache.yaml`.
 
 ## 2.4 Authenticate to gated models and private buckets
 
-**Status:** Supported (HF token); Partial for cloud credentials.
+**Status:** Supported (HF token, private registries for OCI images); Partial for
+cloud credentials.
 
 As an ML engineer, I want serving to authenticate to gated HF models and my
 private storage, so that I can serve licensed or internal weights.
 
 **Acceptance criteria**
 - An `HF_TOKEN` secret is injected for gated model downloads.
+- A registry pull secret is used for private OCI model images.
 - Cloud/storage credentials resolve for `s3://`/`gs://` artifacts.
 
 **Provider mapping** — set `huggingface.tokenSecretName` in the chart; the token
-is attached to the workload's model-puller ServiceAccount.
+is attached to the workload's model-puller ServiceAccount. For a private OCI
+model image, set `llmEngine.parameters.imagePullSecret`.
 > Known limitation: HF token injection does not apply when
 > `enableGatewayRouting` is on (KServe manages its own ServiceAccount).
 

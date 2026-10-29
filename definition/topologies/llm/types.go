@@ -59,7 +59,7 @@ type LlmTopologyParameters struct {
 
 	// PrefillMinReplicas is the WVA autoscaling floor for the prefill workload.
 	// Setting PrefillMinReplicas or PrefillMaxReplicas enables
-	// spec.prefill.scaling (mutually exclusive with PrefillReplicas).
+	// spec.prefill.scaling, and PrefillReplicas is then ignored.
 	// Requires EnablePrefill. KServe requires ≥ 1.
 	PrefillMinReplicas *int32 `json:"prefillMinReplicas,omitempty"`
 

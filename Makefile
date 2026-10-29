@@ -79,10 +79,17 @@ sync-kserve-objects: yq ## Vendor the KServe LLM presets, ClusterServingRuntimes
 	cp $$tmp/kserve-runtime-configs/files/llmisvcconfigs/resources.yaml $(CHART_DIR)/files/llmisvcconfigs/resources.yaml && \
 	helm template kserve $$tmp/kserve-runtime-configs --set kserve.version=$$img \
 		--set kserve.llmisvcConfigs.enabled=false --set kserve.servingruntime.enabled=true \
-		> $(CHART_DIR)/files/kserve/clusterservingruntimes.yaml && \
+		> $$tmp/clusterservingruntimes.yaml && \
+	$(HELM_TEMPLATE_NORMALIZE) $$tmp/clusterservingruntimes.yaml > $(CHART_DIR)/files/kserve/clusterservingruntimes.yaml && \
 	helm template kserve $$tmp/kserve-resources --set kserve.version=$$img --set kserve.storagecontainer.enabled=true \
-		-s templates/common/clusterstoragecontainer.yaml > $(CHART_DIR)/files/kserve/clusterstoragecontainer.yaml; \
+		-s templates/common/clusterstoragecontainer.yaml > $$tmp/clusterstoragecontainer.yaml && \
+	$(HELM_TEMPLATE_NORMALIZE) $$tmp/clusterstoragecontainer.yaml > $(CHART_DIR)/files/kserve/clusterstoragecontainer.yaml; \
 	status=$$?; rm -rf $$tmp; exit $$status
+
+# Helm 4 emits blank lines before each `---` and at the end of `helm template`
+# output, which Helm 3 does not. Drop exactly those so the vendored files are
+# the same whichever Helm generated them (CI runners now ship Helm 4).
+HELM_TEMPLATE_NORMALIZE = awk '/^[[:space:]]*$$/ { blank++; next } { if ($$0 != "---") for (i = 0; i < blank; i++) print ""; blank = 0; print }'
 
 .PHONY: sync-dashboards
 sync-dashboards: ## Copy Grafana dashboard JSON from docs/ into the Helm chart.
