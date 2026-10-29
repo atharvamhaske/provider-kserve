@@ -19,12 +19,14 @@ aggregate.
 ## How it works
 
 When `metrics.podMonitor.enabled` is on (the default), the provider creates one
-`PodMonitor` (`monitoring.coreos.com/v1`) per Instance, owned by that Instance.
-The Prometheus Operator turns that `PodMonitor` into a scrape job. `llm`
-scrapes vLLM `:8000/metrics`; `predictor` scrapes the port and path the serving
-runtime declares in its `prometheus.kserve.io/port` and `/path` annotations,
-which KServe copies onto the predictor pods (`:8080/metrics` for most runtimes,
-Triton `:8002`, TorchServe `:8082`).
+`PodMonitor` (`monitoring.coreos.com/v1`) per Instance, owned by that Instance
+and labeled `core.openeverest.io/instance=<instance>`, which is how
+[plugin-metrics](https://github.com/openeverest/plugin-metrics) finds it to show
+the Instance's Metrics tab. The Prometheus Operator turns that `PodMonitor` into
+a scrape job. `llm` scrapes vLLM `:8000/metrics`; `predictor` scrapes the port
+and path the serving runtime declares in its `prometheus.kserve.io/port` and
+`/path` annotations, which KServe copies onto the predictor pods
+(`:8080/metrics` for most runtimes, Triton `:8002`, TorchServe `:8082`).
 
 ```mermaid
 flowchart TB
