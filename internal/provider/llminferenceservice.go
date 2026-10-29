@@ -88,6 +88,9 @@ func validateLLM(c *controller.Context) error {
 	if _, err := apis.ParseURL(params.ModelURI); err != nil {
 		return fmt.Errorf("invalid %s.parameters.modelURI %q: %w", common.ComponentLlmEngine, params.ModelURI, err)
 	}
+	if err := validateLLMModelSource(params); err != nil {
+		return err
+	}
 	if comp.Replicas != nil && *comp.Replicas < 0 {
 		return fmt.Errorf("%s replicas must not be negative", common.ComponentLlmEngine)
 	}
@@ -823,6 +826,7 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 		return nil, err
 	}
 	applyStorageInitializerResources(&spec, params, storageInitResources)
+	applyImagePullSecret(&spec, params.ImagePullSecret)
 
 	// Distributed tracing. A present-but-empty TracingSpec enables KServe's
 	// default OTLP instrumentation; an endpoint override is applied when set.

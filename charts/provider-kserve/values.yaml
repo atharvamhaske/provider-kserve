@@ -179,7 +179,8 @@ presets:
 # or reorder models — changes take effect on `helm upgrade`, no regeneration
 # needed. Each entry:
 #   label: display name shown in the UI
-#   uri:   model location (hf://..., s3://..., pvc://...)
+#   uri:   model location (hf://..., s3://..., pvc://..., oci://... or
+#          oci+native://... for a model packaged as a container image)
 #   gated: (optional) true for models needing a HuggingFace token + access
 #          approval. Gated entries get a "(gated)" suffix in the UI and require
 #          `huggingface.tokenSecretName` to be set (see below).
@@ -213,6 +214,16 @@ models:
     uri: "hf://mistralai/Mistral-Small-24B-Instruct-2501"
   - label: "DeepSeek-R1 Distill Qwen 7B"
     uri: "hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+  # --- OCI model images (modelcars) from Red Hat's public modelcar catalog ---
+  # The kubelet pulls the image once per node and caches it, so restarts and
+  # new replicas on that node skip the download. See "OCI model images" in the
+  # README for building your own.
+  - label: "TinyLlama 1.1B Chat (OCI image)"
+    uri: "oci://quay.io/redhat-ai-services/modelcar-catalog:tinyllama-1.1b-chat-v1.0"
+  - label: "Granite 3.3 2B Instruct (OCI image)"
+    uri: "oci://quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct"
+  - label: "Qwen2.5 7B Instruct (OCI image)"
+    uri: "oci://quay.io/redhat-ai-services/modelcar-catalog:qwen2.5-7b-instruct"
   # --- Gated models (require a HuggingFace token + access approval) ---
   - label: "Llama 4 Scout 17B-16E Instruct"
     uri: "hf://meta-llama/Llama-4-Scout-17B-16E-Instruct"

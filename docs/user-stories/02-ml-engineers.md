@@ -16,11 +16,15 @@ its adapters, and how it gets onto the node.
 
 **Status:** Supported (both)
 
-As an ML engineer, I want to point serving at an exact model in HF, S3, GCS, or
-a PVC, so that I can ship the fine-tune I just produced.
+As an ML engineer, I want to point serving at an exact model in HF, S3, a PVC or
+a container image (plus GCS and other stores for `predictor`), so that I can ship
+the fine-tune I just produced.
 
 **Acceptance criteria**
-- `hf://`, `s3://`, `gs://`, `pvc://` (and `oci://` for predictor) are accepted.
+- `llm`: `hf://`, `s3://`, `pvc://`, `oci://` and `oci+native://` are accepted;
+  other schemes are rejected up front.
+- `predictor`: `hf://`, `s3://`, `gs://`, `pvc://`, `oci://` and the other
+  KServe storage URIs are accepted.
 - A pinned revision/path resolves to that exact artifact.
 
 **Provider mapping**
@@ -72,24 +76,31 @@ See `examples/instance-llm-lora.yaml`.
 
 ## 2.3 Pre-pull / cache model weights on nodes
 
-**Status:** Partial — `disableStorageInitializer` supports pre-loaded models;
-the `LocalModelCache` wiring is not exposed as a provider field.
+**Status:** Supported (`llm`) through OCI model images; `LocalModelCache` is not
+wired up yet ([#108](https://github.com/openeverest/provider-kserve/issues/108)).
 
 As an ML engineer, I want large weights pre-pulled and cached on nodes, so that
 new replicas start fast and I do not re-download gigabytes on every rollout.
 
 **Acceptance criteria**
-- A model can be pre-populated onto nodes (LocalModelCache / modelcar / PVC).
-- When a model is pre-loaded, the storage-initializer can be skipped.
+- A model can be cached on nodes (OCI model image / LocalModelCache / PVC).
+- A restart, rollout or new replica on a node that has the model does not
+  download it again.
 - Cold-start time for a new replica drops to node-local read speed.
 
-**Provider mapping**
+**Provider mapping** — package the model as an image; the kubelet caches it per
+node. See "OCI model images" in the README and `examples/instance-llm-oci.yaml`.
 ```yaml
 components:
   llmEngine:
     parameters:
-      disableStorageInitializer: true   # model already on-node (cache/modelcar)
+      modelURI: oci+native://registry.example.com/models/qwen3-8b:v1  # or oci://
+      imagePullSecret: registry-pull   # private registry only
 ```
+
+A model already on the node (e.g. staged by a `LocalModelCache`) can be served
+with `disableStorageInitializer: true`, which skips model attachment entirely;
+it must stay off for OCI images.
 
 **Gap to close:** expose a `LocalModelCache` reference (or a `cache: true`
 convenience) so the provider provisions the cache rather than requiring the
@@ -99,17 +110,20 @@ model to be staged out-of-band.
 
 ## 2.4 Authenticate to gated models and private buckets
 
-**Status:** Supported (HF token); Partial for cloud credentials.
+**Status:** Supported (HF token, private registries for OCI images); Partial for
+cloud credentials.
 
 As an ML engineer, I want serving to authenticate to gated HF models and my
 private storage, so that I can serve licensed or internal weights.
 
 **Acceptance criteria**
 - An `HF_TOKEN` secret is injected for gated model downloads.
+- A registry pull secret is used for private OCI model images.
 - Cloud/storage credentials resolve for `s3://`/`gs://` artifacts.
 
 **Provider mapping** — set `huggingface.tokenSecretName` in the chart; the token
-is attached to the workload's model-puller ServiceAccount.
+is attached to the workload's model-puller ServiceAccount. For a private OCI
+model image, set `llmEngine.parameters.imagePullSecret`.
 > Known limitation: HF token injection does not apply when
 > `enableGatewayRouting` is on (KServe manages its own ServiceAccount).
 

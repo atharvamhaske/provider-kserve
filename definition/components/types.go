@@ -41,8 +41,9 @@ type LoRASpec struct {
 // which is rendered into a KServe LLMInferenceService (serving.kserve.io/v1alpha2).
 type VllmCustomSpec struct {
 	// ModelURI is the location of the model artifacts, e.g.
-	// "hf://meta-llama/Llama-3.1-8B-Instruct", "s3://bucket/model" or "pvc://claim/path".
-	// The storage-initializer uses this URI to download the model.
+	// "hf://meta-llama/Llama-3.1-8B-Instruct", "s3://bucket/model",
+	// "pvc://claim/path", "oci://registry/repo:tag" (a modelcar image) or
+	// "oci+native://registry/repo:tag" (mounted as a Kubernetes image volume).
 	ModelURI string `json:"modelURI,omitempty"`
 
 	// ModelName is the name advertised in the "model" field of inference requests.
@@ -102,11 +103,17 @@ type VllmCustomSpec struct {
 	// provider supplies metadata.
 	Config string `json:"config,omitempty"`
 
-	// DisableStorageInitializer skips the storage-initializer init container.
-	// Useful when models are pre-loaded via a LocalModelCache, modelcar, or an
-	// alternative streamer (e.g. RunAI Model Streamer). Must remain false when
-	// LoRA adapters use hf:// or s3:// URIs.
+	// DisableStorageInitializer skips the step that makes the model available
+	// to vLLM: KServe then attaches nothing, so the model must already be at
+	// /mnt/models (e.g. a LocalModelCache or a volume from the inline config).
+	// Must remain false for oci:// and oci+native:// models, and when LoRA
+	// adapters use hf:// or s3:// URIs.
 	DisableStorageInitializer *bool `json:"disableStorageInitializer,omitempty"`
+
+	// ImagePullSecret names a Secret in the Instance namespace used to pull
+	// images from a private registry, typically an oci:// model image. It is
+	// set on every vLLM pod: head, workers and prefill.
+	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
 	// LoRA attaches one or more LoRA adapters to the base model. Rendered to
 	// LLMInferenceService.spec.model.lora; KServe handles download and vLLM flags.

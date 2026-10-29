@@ -35,6 +35,8 @@ spec:
             gpuCount:
               format: int32
               type: integer
+            imagePullSecret:
+              type: string
             kvCacheSpaceGi:
               format: int32
               type: integer
@@ -495,6 +497,17 @@ spec:
           label: Advanced
         basicInfo:
           components:
+            imagePullSecret:
+              fieldParams:
+                helperText: 'For an OCI image model in a private registry: a Secret in the Instance namespace.'
+                label: Image pull secret
+                placeholder: None (public registry)
+              path: spec.components.llmEngine.parameters.imagePullSecret
+              uiType: text
+              validation:
+                regex:
+                  message: Must be a valid Secret name (lowercase letters, digits, '-' and '.')
+                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
             modelName:
               fieldParams:
                 label: Served Model Name
@@ -526,6 +539,7 @@ spec:
                 required: true
           componentsOrder:
             - modelURI
+            - imagePullSecret
             - modelName
             - version
           description: Configure the model to serve.
