@@ -7,7 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -971,6 +973,46 @@ func buildLocalModelNamespaceCache(c *controller.Context, params components.Vllm
 	return cache
 }
 
+func requireLocalModelNamespaceCacheOwner(c *controller.Context, cache *unstructured.Unstructured) error {
+	owner := metav1.GetControllerOf(cache)
+	if owner == nil {
+		return fmt.Errorf(
+			"LocalModelNamespaceCache %q is not controller-owned by Instance %q (UID %q)",
+			cache.GetName(), c.Name(), c.Instance().UID,
+		)
+	}
+	if owner.UID != c.Instance().UID {
+		return fmt.Errorf(
+			"LocalModelNamespaceCache %q is controller-owned by %s %q (UID %q), not Instance %q (UID %q)",
+			cache.GetName(), owner.Kind, owner.Name, owner.UID, c.Name(), c.Instance().UID,
+		)
+	}
+	return nil
+}
+
+func deleteOwnedLocalModelNamespaceCache(c *controller.Context, cache *unstructured.Unstructured) error {
+	if err := requireLocalModelNamespaceCacheOwner(c, cache); err != nil {
+		return err
+	}
+	if err := c.Delete(cache); err != nil && !apimeta.IsNoMatchError(err) {
+		return fmt.Errorf("deleting LocalModelNamespaceCache %q: %w", c.Name(), err)
+	}
+	return nil
+}
+
+func cleanupLocalModelNamespaceCache(c *controller.Context) error {
+	cache := unstructuredObject(localModelNamespaceCacheGVK)
+	key := types.NamespacedName{Name: c.Name(), Namespace: c.Namespace()}
+	err := c.Client().Get(c.Context(), key, cache)
+	if apierrors.IsNotFound(err) || apimeta.IsNoMatchError(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting LocalModelNamespaceCache %q: %w", c.Name(), err)
+	}
+	return deleteOwnedLocalModelNamespaceCache(c, cache)
+}
+
 func deleteLLMForCacheTransition(c *controller.Context) (bool, error) {
 	llmisvc := &kservev1alpha2.LLMInferenceService{}
 	key := types.NamespacedName{Name: c.Name(), Namespace: c.Namespace()}
@@ -992,16 +1034,16 @@ func deleteLLMForCacheTransition(c *controller.Context) (bool, error) {
 // stale cache because KServe protects caches that are still in use.
 func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec) (bool, error) {
 	enabled := params.LocalModelCache != nil && params.LocalModelCache.Enabled
-	if !common.LocalModelEnabled() {
-		if enabled {
-			return false, fmt.Errorf("local model cache requires kserveResources.kserve.localmodel.enabled in the provider chart")
-		}
-		return true, nil
+	if !common.LocalModelEnabled() && enabled {
+		return false, fmt.Errorf("local model cache requires kserveResources.kserve.localmodel.enabled in the provider chart")
 	}
 
 	cache := unstructuredObject(localModelNamespaceCacheGVK)
 	key := types.NamespacedName{Name: c.Name(), Namespace: c.Namespace()}
 	err := c.Client().Get(c.Context(), key, cache)
+	if apimeta.IsNoMatchError(err) && !enabled {
+		return true, nil
+	}
 	if apierrors.IsNotFound(err) {
 		if !enabled {
 			return true, nil
@@ -1014,6 +1056,9 @@ func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec
 	}
 	if err != nil {
 		return false, fmt.Errorf("getting LocalModelNamespaceCache %q: %w", c.Name(), err)
+	}
+	if err := requireLocalModelNamespaceCacheOwner(c, cache); err != nil {
+		return false, err
 	}
 
 	sourceURI, found, err := unstructured.NestedString(cache.Object, "spec", "sourceModelUri")
@@ -1028,8 +1073,8 @@ func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec
 		if workloadDeleted {
 			return false, nil
 		}
-		if err := c.Delete(cache); err != nil {
-			return false, fmt.Errorf("deleting LocalModelNamespaceCache %q: %w", c.Name(), err)
+		if err := deleteOwnedLocalModelNamespaceCache(c, cache); err != nil {
+			return false, err
 		}
 		return false, nil
 	}
