@@ -30,6 +30,28 @@ spec:
               type: integer
             disableStorageInitializer:
               type: boolean
+            engine:
+              properties:
+                dtype:
+                  type: string
+                gpuMemoryUtilization:
+                  format: double
+                  type: number
+                kvCacheDtype:
+                  type: string
+                maxModelLen:
+                  format: int32
+                  type: integer
+                maxNumSeqs:
+                  format: int32
+                  type: integer
+                quantization:
+                  type: string
+                reasoningParser:
+                  type: string
+                toolCallParser:
+                  type: string
+              type: object
             expertParallel:
               type: string
             gpuCount:
@@ -486,12 +508,12 @@ spec:
                       - name: main
                         args:
                           - --enforce-eager
-                          - --max-model-len=2048
+                          - --enable-prefix-caching
               path: spec.components.llmEngine.parameters.config
               uiType: text
           componentsOrder:
             - config
-          description: Provide a custom LLMInferenceServiceConfig spec (YAML) for runtime settings not exposed above — extra vLLM args, env vars, or scheduling. The provider creates a config owned by this instance and merges it via baseRefs; it overrides the compute-profile preset, while the structured fields above still take precedence. Enter only the config spec body.
+          description: Provide a custom LLMInferenceServiceConfig spec (YAML) for runtime settings not exposed above — other vLLM args, env vars, or scheduling. The provider creates a config owned by this instance and merges it via baseRefs; it overrides the compute-profile preset, while the structured fields above still take precedence. Enter only the config spec body.
           label: Advanced
         basicInfo:
           components:
@@ -649,6 +671,213 @@ spec:
             - prefillWorkerResources
           description: Split prefill and decode into independently scaled deployments (llm-d pattern).
           label: Disaggregated Serving
+        engine:
+          components:
+            memory:
+              components:
+                limits:
+                  components:
+                    gpuMemoryUtilization:
+                      fieldParams:
+                        helperText: --gpu-memory-utilization, 0–1. Host memory on CPU.
+                        label: GPU memory utilization
+                        placeholder: vLLM default
+                        step: 0.05
+                      path: spec.components.llmEngine.parameters.engine.gpuMemoryUtilization
+                      uiType: number
+                      validation:
+                        max: 1
+                        min: 0.01
+                    maxModelLen:
+                      fieldParams:
+                        badge: tokens
+                        helperText: --max-model-len
+                        label: Max context length
+                        placeholder: Model maximum
+                      path: spec.components.llmEngine.parameters.engine.maxModelLen
+                      uiType: number
+                      validation:
+                        int: true
+                        min: 1
+                    maxNumSeqs:
+                      fieldParams:
+                        helperText: --max-num-seqs
+                        label: Max concurrent sequences
+                        placeholder: vLLM default
+                      path: spec.components.llmEngine.parameters.engine.maxNumSeqs
+                      uiType: number
+                      validation:
+                        int: true
+                        min: 1
+                  componentsOrder:
+                    - maxModelLen
+                    - maxNumSeqs
+                    - gpuMemoryUtilization
+                  groupType: line
+                  uiType: group
+              description: Lower the context length first when vLLM fails to start with a KV cache or out-of-memory error.
+              groupType: bordered
+              label: Context & batching
+              uiType: group
+            precision:
+              components:
+                types:
+                  components:
+                    dtype:
+                      fieldParams:
+                        displayEmpty: true
+                        helperText: --dtype
+                        label: Weights dtype
+                        options:
+                          - label: auto
+                            value: auto
+                          - label: bfloat16
+                            value: bfloat16
+                          - label: float16
+                            value: float16
+                          - label: float32
+                            value: float32
+                      path: spec.components.llmEngine.parameters.engine.dtype
+                      uiType: select
+                    kvCacheDtype:
+                      fieldParams:
+                        displayEmpty: true
+                        helperText: --kv-cache-dtype. FP8 fits about twice the tokens.
+                        label: KV cache dtype
+                        options:
+                          - label: auto
+                            value: auto
+                          - label: fp8
+                            value: fp8
+                          - label: fp8_e4m3
+                            value: fp8_e4m3
+                          - label: fp8_e5m2
+                            value: fp8_e5m2
+                      path: spec.components.llmEngine.parameters.engine.kvCacheDtype
+                      uiType: select
+                    quantization:
+                      fieldParams:
+                        displayEmpty: true
+                        helperText: --quantization
+                        label: Quantization
+                        options:
+                          - label: FP8 (on load, Ada/Hopper+)
+                            value: fp8
+                          - label: bitsandbytes 4-bit (on load)
+                            value: bitsandbytes
+                          - label: AWQ (Marlin)
+                            value: awq_marlin
+                          - label: GPTQ (Marlin)
+                            value: gptq_marlin
+                          - label: compressed-tensors
+                            value: compressed-tensors
+                      path: spec.components.llmEngine.parameters.engine.quantization
+                      uiType: select
+                  componentsOrder:
+                    - dtype
+                    - quantization
+                    - kvCacheDtype
+                  groupType: line
+                  uiType: group
+              description: 'Leave Quantization empty for pre-quantized checkpoints (AWQ, GPTQ, FP8): vLLM detects them on its own.'
+              groupType: bordered
+              label: Precision
+              uiType: group
+            reasoning:
+              components:
+                reasoningParser:
+                  fieldParams:
+                    helperText: --reasoning-parser
+                    label: Reasoning parser
+                    options:
+                      - label: qwen3 (Qwen 3)
+                        value: qwen3
+                      - label: deepseek_r1 (DeepSeek-R1, QwQ)
+                        value: deepseek_r1
+                      - label: deepseek_v3 (DeepSeek-V3.1)
+                        value: deepseek_v3
+                      - label: openai_gptoss (gpt-oss)
+                        value: openai_gptoss
+                      - label: glm45 (GLM-4.5, GLM-4.6)
+                        value: glm45
+                      - label: kimi_k2 (Kimi K2)
+                        value: kimi_k2
+                      - label: granite (Granite 3.2+)
+                        value: granite
+                      - label: mistral (Magistral)
+                        value: mistral
+                      - label: gemma4 (Gemma 4)
+                        value: gemma4
+                      - label: minimax_m2 (MiniMax-M2)
+                        value: minimax_m2
+                      - label: nemotron_v3 (Nemotron 3)
+                        value: nemotron_v3
+                      - label: seed_oss (Seed-OSS)
+                        value: seed_oss
+                  path: spec.components.llmEngine.parameters.engine.reasoningParser
+                  uiType: select
+                  validation:
+                    required: true
+              description: 'For reasoning models: returns the model''s thinking in a separate reasoning_content field instead of mixing it into the answer.'
+              groupType: toggleable
+              label: Reasoning output
+              uiType: group
+            toolCalling:
+              components:
+                toolCallParser:
+                  fieldParams:
+                    helperText: --enable-auto-tool-choice --tool-call-parser
+                    label: Tool call parser
+                    options:
+                      - label: hermes (Qwen 2.5, Qwen 3, Hermes)
+                        value: hermes
+                      - label: qwen3_coder (Qwen3-Coder)
+                        value: qwen3_coder
+                      - label: llama3_json (Llama 3.1–3.3)
+                        value: llama3_json
+                      - label: llama4_pythonic (Llama 4)
+                        value: llama4_pythonic
+                      - label: mistral (Mistral, Mixtral)
+                        value: mistral
+                      - label: openai (gpt-oss)
+                        value: openai
+                      - label: deepseek_v3 (DeepSeek-V3, R1)
+                        value: deepseek_v3
+                      - label: deepseek_v31 (DeepSeek-V3.1)
+                        value: deepseek_v31
+                      - label: glm45 (GLM-4.5, GLM-4.6)
+                        value: glm45
+                      - label: kimi_k2 (Kimi K2)
+                        value: kimi_k2
+                      - label: granite (Granite 3)
+                        value: granite
+                      - label: granite4 (Granite 4)
+                        value: granite4
+                      - label: gemma4 (Gemma 4)
+                        value: gemma4
+                      - label: phi4_mini_json (Phi-4-mini)
+                        value: phi4_mini_json
+                      - label: minimax_m2 (MiniMax-M2)
+                        value: minimax_m2
+                      - label: xlam (xLAM)
+                        value: xlam
+                      - label: pythonic (Llama 3.2, ToolACE)
+                        value: pythonic
+                  path: spec.components.llmEngine.parameters.engine.toolCallParser
+                  uiType: select
+                  validation:
+                    required: true
+              description: Lets clients send OpenAI tools and get tool calls back. Pick the parser that matches the model's chat template.
+              groupType: toggleable
+              label: Tool calling
+              uiType: group
+          componentsOrder:
+            - memory
+            - precision
+            - toolCalling
+            - reasoning
+          description: vLLM engine settings. Empty fields keep vLLM's defaults. Each one maps to a vllm serve flag and wins over the same flag in the Advanced config.
+          label: Engine Tuning
         lora:
           components:
             loraDeployment:
@@ -998,6 +1227,7 @@ spec:
         - basicInfo
         - scaling
         - runtime
+        - engine
         - lora
         - routing
         - disaggregation

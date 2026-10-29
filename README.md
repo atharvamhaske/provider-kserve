@@ -250,6 +250,7 @@ Source of truth: [definition/versions.yaml](definition/versions.yaml).
 | `expertParallel` | string | `enabled` / `disabled` (default) expert parallelism (`ParallelismSpec.expert`) for MoE models (Mixtral, DeepSeek, Qwen-MoE). |
 | `computeProfile` | string | `gpu` (default) uses the bundled CUDA presets; `cpu` composes the CPU-only `kserve-config-llm-cpu` config via `baseRefs`. See [Compute profile](#compute-profile-cpu-serving). |
 | `kvCacheSpaceGi` | int32 | Caps `VLLM_CPU_KVCACHE_SPACE` on the CPU profile. |
+| `engine` | object | vLLM engine flags: context length, memory, precision, tool calling, reasoning. See [Engine tuning](#engine-tuning). |
 | `baseRefs` | []string | `LLMInferenceServiceConfig` names to inherit/merge. |
 | `config` | string | Inline `LLMInferenceServiceConfig` spec body. See [Advanced customization](#advanced-customization-inline-config). |
 | `disableStorageInitializer` | bool | Skip the storage-initializer init container. |
@@ -757,10 +758,20 @@ cpuProfile:
     - --max-model-len=2048           # smaller context = smaller KV arena
 ```
 
-These flow into the vLLM command as container args. To override them for a single instance,
-set `args` on the `main` container in the topology's **Advanced** (inline
-`LLMInferenceServiceConfig`) section — KServe treats a container's `args` as atomic, so your
-list **replaces** the preset defaults entirely (re-specify any you still want):
+These flow into the vLLM command as container args. To change one of them for a single
+instance, set the matching [Engine Tuning](#engine-tuning) field: it is appended after the
+defaults and wins, and the other defaults stay.
+
+```yaml
+engine:
+  gpuMemoryUtilization: 0.5
+  maxModelLen: 4096
+```
+
+To drop a default instead (say `--enforce-eager`), set `args` on the `main` container in the
+topology's **Advanced** (inline `LLMInferenceServiceConfig`) section — KServe treats a
+container's `args` as atomic, so your list **replaces** the preset defaults entirely
+(re-specify any you still want):
 
 ```yaml
 config: |
@@ -768,8 +779,8 @@ config: |
     containers:
       - name: main
         args:
-          - --gpu-memory-utilization=0.5
-          - --max-model-len=4096
+          - --gpu-memory-utilization=0.3
+          - --max-model-len=2048
 ```
 
 Set **CPU KV Cache Space** (`parameters.kvCacheSpaceGi`) only to additionally cap
@@ -927,12 +938,51 @@ The image runs with the permissions of the Instance namespace, like any pod. Res
 Instance authors may run with [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
 or an admission policy on the namespace.
 
+### Engine tuning
+
+`llmEngine.parameters.engine` exposes the vLLM settings people change most, as the **Engine
+Tuning** section in the UI. Each set field becomes one `vllm serve` flag; empty fields keep
+vLLM's defaults.
+
+| Field | vLLM flag | Notes |
+|---|---|---|
+| `maxModelLen` | `--max-model-len` | Context length in tokens. Lowering it is the usual fix when the model does not fit in GPU memory. |
+| `gpuMemoryUtilization` | `--gpu-memory-utilization` | Fraction in (0, 1] of GPU memory vLLM may claim. Host memory on the CPU profile. |
+| `maxNumSeqs` | `--max-num-seqs` | Sequences batched per iteration. |
+| `dtype` | `--dtype` | `auto`, `half`, `float16`, `bfloat16`, `float` or `float32`. |
+| `quantization` | `--quantization` | e.g. `fp8` or `bitsandbytes` to quantize on load. Leave empty for pre-quantized checkpoints. |
+| `kvCacheDtype` | `--kv-cache-dtype` | e.g. `fp8` to fit about twice the tokens. |
+| `toolCallParser` | `--enable-auto-tool-choice --tool-call-parser` | Turns on OpenAI tool calling. Match the model: `hermes` (Qwen), `llama3_json`, `mistral`, `openai` (gpt-oss), … |
+| `reasoningParser` | `--reasoning-parser` | Returns thinking in `reasoning_content`: `qwen3`, `deepseek_r1`, `openai_gptoss`, … |
+
+```yaml
+components:
+  llmEngine:
+    parameters:
+      modelURI: hf://Qwen/Qwen3-8B
+      engine:
+        maxModelLen: 16384
+        kvCacheDtype: fp8
+        toolCallParser: hermes
+        reasoningParser: qwen3
+```
+
+The UI lists the common values; the API accepts any single-word value, so new vLLM
+quantization methods and parsers work without a provider release.
+
+The flags apply to every vLLM pod: head, workers and prefill. They are appended after the args
+the pods already get from the compute-profile preset, `baseRefs` and the [inline
+config](#advanced-customization-inline-config), and vLLM keeps the last value of a repeated
+flag, so the engine fields win. The provider carries the inherited args over because setting
+`args` on the `LLMInferenceService` replaces the list it would inherit: the CPU profile keeps
+its defaults (`--enforce-eager`, …) when you set, say, `maxModelLen`.
+
 ### Advanced customization (inline config)
 
-The structured fields cover the common knobs (model, resources, parallelism, KV cache). For
-anything else — extra vLLM args, environment variables, scheduling — use the **Advanced**
-section (`llmEngine.parameters.config`) to author an inline `LLMInferenceServiceConfig` **spec
-body**:
+The structured fields cover the common knobs (model, resources, parallelism, KV cache, [engine
+flags](#engine-tuning)). For anything else — other vLLM args, environment variables,
+scheduling — use the **Advanced** section (`llmEngine.parameters.config`) to author an inline
+`LLMInferenceServiceConfig` **spec body**:
 
 ```yaml
 components:
@@ -944,15 +994,15 @@ components:
             - name: main
               args:
                 - --enforce-eager      # skip torch.compile (lowers CPU memory)
-                - --max-model-len=2048 # cap context length (shrinks KV cache)
+                - --enable-prefix-caching
 ```
 
 On reconcile the provider materializes this as an `LLMInferenceServiceConfig` named
 `<instance>-config` in the Instance's namespace, owned by the Instance (so it is
 garbage-collected with it), and attaches it to the `LLMInferenceService` via `baseRefs`. It is
 applied **last**, so it overrides the compute-profile preset and any `baseRefs` you set, while
-the Instance's own structured fields (model, resources, the derived KV cache env) still win
-over it. Enter only the config spec body — the provider supplies the metadata.
+the Instance's own structured fields (model, resources, the derived KV cache env, engine flags)
+still win over it. Enter only the config spec body — the provider supplies the metadata.
 
 To reference *pre-existing* shared configs instead of authoring one inline, list their names in
 `llmEngine.parameters.baseRefs` (API-only).

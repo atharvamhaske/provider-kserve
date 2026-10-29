@@ -60,21 +60,24 @@ spec:
         # it small: vLLM refuses to start if it exceeds host-free memory.
         # kvCacheSpaceGi: 1
 
-        # Advanced: extra runtime settings not exposed as first-class fields.
+        # Engine Tuning: override single vLLM flags. The CPU profile already
+        # applies defaults via the chart (cpuProfile.defaultArgs):
+        # --gpu-memory-utilization=0.3, --enforce-eager, --max-model-len=2048.
+        # Engine fields are appended after them and win, so the other defaults
+        # stay.
+        engine:
+          maxModelLen: 4096
+
+        # Advanced: other runtime settings not exposed as first-class fields.
         # The provider materializes this as an Instance-owned
         # LLMInferenceServiceConfig and attaches it last via baseRefs. Enter only
-        # the config spec body.
-        #
-        # The CPU profile ALREADY applies sensible defaults via the chart
-        # (cpuProfile.defaultArgs): --gpu-memory-utilization=0.3, --enforce-eager,
-        # --max-model-len=2048. Setting `args` here REPLACES that whole list
-        # (KServe treats container args as atomic), so re-specify any you want to
-        # keep. This block is optional — omit it to just use the defaults.
-        config: |
-          template:
-            containers:
-              - name: main
-                args:
-                  - --gpu-memory-utilization=0.3
-                  - --enforce-eager
-                  - --max-model-len=4096
+        # the config spec body. Setting `args` here REPLACES the whole
+        # cpuProfile.defaultArgs list (KServe treats container args as atomic),
+        # so re-specify any you want to keep.
+        # config: |
+        #   template:
+        #     containers:
+        #       - name: main
+        #         args:
+        #           - --gpu-memory-utilization=0.3
+        #           - --max-model-len=4096

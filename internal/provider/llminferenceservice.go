@@ -100,6 +100,9 @@ func validateLLM(c *controller.Context) error {
 			return err
 		}
 	}
+	if err := validateEngine(params.Engine); err != nil {
+		return err
+	}
 	if comp.Service != nil {
 		switch comp.Service.ServiceType {
 		case "", corev1.ServiceTypeClusterIP, corev1.ServiceTypeLoadBalancer, corev1.ServiceTypeNodePort:
@@ -823,6 +826,22 @@ func buildLLMInferenceService(c *controller.Context) (*kservev1alpha2.LLMInferen
 		return nil, err
 	}
 	applyStorageInitializerResources(&spec, params, storageInitResources)
+
+	if flags := engineArgs(params.Engine); len(flags) > 0 {
+		var inline *kservev1alpha2.LLMInferenceServiceSpec
+		if strings.TrimSpace(params.Config) != "" {
+			parsed, err := parseLLMConfigSpec(params.Config)
+			if err != nil {
+				return nil, err
+			}
+			inline = &parsed
+		}
+		inherited, err := resolveInheritedArgs(c, spec.BaseRefs, inline)
+		if err != nil {
+			return nil, err
+		}
+		applyEngineArgs(&spec, inherited, flags)
+	}
 
 	// Distributed tracing. A present-but-empty TracingSpec enables KServe's
 	// default OTLP instrumentation; an endpoint override is applied when set.

@@ -521,7 +521,9 @@ cpuProfile:
   # torch.compile (--enforce-eager), and shrink the KV arena (--max-model-len).
   # They are the *defaults*; a per-instance Advanced (inline
   # LLMInferenceServiceConfig) `args` on the `main` container replaces this whole
-  # list, so users can override any of them. Set to [] to apply no defaults.
+  # list, so users can override any of them. Engine Tuning fields
+  # (llmEngine.parameters.engine) are appended after the list and win over the
+  # same flags. Set to [] to apply no defaults.
   defaultArgs:
     - --gpu-memory-utilization=0.3
     - --enforce-eager

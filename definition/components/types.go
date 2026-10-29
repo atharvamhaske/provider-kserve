@@ -37,6 +37,47 @@ type LoRASpec struct {
 	MaxCpuAdapters *int32 `json:"maxCpuAdapters,omitempty"`
 }
 
+// VllmEngineSpec holds the vLLM engine settings users change most often. Each
+// set field becomes one `vllm serve` flag; empty fields keep vLLM's default.
+type VllmEngineSpec struct {
+	// MaxModelLen caps the context length in tokens (--max-model-len). Lowering
+	// it shrinks the KV cache, the usual fix when a model does not fit in GPU
+	// memory.
+	MaxModelLen *int32 `json:"maxModelLen,omitempty"`
+
+	// GpuMemoryUtilization is the fraction of GPU memory, in (0, 1], vLLM may
+	// claim for weights and KV cache (--gpu-memory-utilization). On the CPU
+	// profile vLLM applies it to host memory.
+	GpuMemoryUtilization *float64 `json:"gpuMemoryUtilization,omitempty"`
+
+	// MaxNumSeqs caps the sequences batched per iteration (--max-num-seqs).
+	MaxNumSeqs *int32 `json:"maxNumSeqs,omitempty"`
+
+	// Dtype is the weight and activation precision (--dtype): auto, half,
+	// float16, bfloat16, float or float32.
+	Dtype string `json:"dtype,omitempty"`
+
+	// Quantization names the weight quantization method (--quantization), e.g.
+	// fp8, awq_marlin or bitsandbytes. vLLM detects pre-quantized checkpoints on
+	// its own; set it to quantize on the fly or to force a kernel.
+	Quantization string `json:"quantization,omitempty"`
+
+	// KVCacheDtype is the KV cache precision (--kv-cache-dtype), e.g. fp8 to fit
+	// roughly twice the tokens.
+	KVCacheDtype string `json:"kvCacheDtype,omitempty"`
+
+	// ToolCallParser turns on OpenAI-style tool calling with the parser matching
+	// the model's chat template (--enable-auto-tool-choice --tool-call-parser),
+	// e.g. hermes for Qwen, llama3_json for Llama 3.x, mistral, openai for
+	// gpt-oss.
+	ToolCallParser string `json:"toolCallParser,omitempty"`
+
+	// ReasoningParser returns the model's thinking in the response's
+	// reasoning_content field instead of the answer (--reasoning-parser), e.g.
+	// qwen3, deepseek_r1 or openai_gptoss.
+	ReasoningParser string `json:"reasoningParser,omitempty"`
+}
+
 // VllmCustomSpec defines custom configuration for the vllm component type,
 // which is rendered into a KServe LLMInferenceService (serving.kserve.io/v1alpha2).
 type VllmCustomSpec struct {
@@ -86,6 +127,12 @@ type VllmCustomSpec struct {
 	// cache to a specific size; vLLM refuses to start if it exceeds host-free
 	// memory at that moment. Ignored for the GPU profile.
 	KVCacheSpaceGi *int32 `json:"kvCacheSpaceGi,omitempty"`
+
+	// Engine holds first-class vLLM engine settings (context length, memory,
+	// precision, tool calling, reasoning). The provider appends them after the
+	// args the workload inherits from the compute profile, baseRefs and the
+	// inline config, so they win over the same flags set there.
+	Engine *VllmEngineSpec `json:"engine,omitempty"`
 
 	// BaseRefs is an ordered list of LLMInferenceServiceConfig names whose specs
 	// are inherited and merged (later entries win, this Instance wins over all).
