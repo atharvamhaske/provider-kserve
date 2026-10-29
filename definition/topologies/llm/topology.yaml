@@ -40,6 +40,19 @@ ui:
               valuePath: uri
           validation:
             required: true
+        imagePullSecret:
+          uiType: text
+          path: spec.components.llmEngine.parameters.imagePullSecret
+          fieldParams:
+            label: Image pull secret
+            placeholder: None (public registry)
+            helperText: >-
+              For an OCI image model in a private registry: a Secret in the
+              Instance namespace.
+          validation:
+            regex:
+              pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+              message: Must be a valid Secret name (lowercase letters, digits, '-' and '.')
         modelName:
           uiType: text
           path: spec.components.llmEngine.parameters.modelName
@@ -59,6 +72,7 @@ ui:
             required: true
       componentsOrder:
       - modelURI
+      - imagePullSecret
       - modelName
       - version
     scaling:
