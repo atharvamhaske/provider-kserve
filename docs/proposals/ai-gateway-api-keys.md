@@ -367,7 +367,7 @@ garbage-collected with the model.
 ### 6.2 Named keys per model: plugin-user-management (in progress)
 
 [plugin-user-management](https://github.com/openeverest/plugin-user-management)
-already manages "users of an instance" for databases: a `DatabaseUser`
+already manages "users of an instance" for databases: an `InstanceUser`
 resource, a Users tab on the instance page, generated credentials in a Secret
 applications can mount, and permission checks against OpenEverest RBAC. A key
 for a model is the same thing as a user of a database, so the plugin gets a
@@ -376,7 +376,7 @@ for a model is the same thing as a user of a database, so the plugin gets a
 ```mermaid
 flowchart LR
   UI["Users tab<br/>(model instance)"] --> API[plugin API]
-  API -->|DatabaseUser + credentials Secret| K8S[(Kubernetes)]
+  API -->|InstanceUser + credentials Secret| K8S[(Kubernetes)]
   K8S --> CTRL[plugin controller<br/>kserve engine]
   CTRL -->|"key Secret (6.1)<br/>owner-kind: user"| KS[key Secrets]
   PK[provider-kserve] -->|"per-model key<br/>owner-kind: instance"| KS
@@ -386,7 +386,7 @@ flowchart LR
 
 | plugin concept | Meaning for a model |
 |---|---|
-| `DatabaseUser.spec.instanceRef` | The model Instance |
+| `InstanceUser.spec.instanceRef` | The model Instance |
 | `username` | Consumer name (application, team or person). Stored as `owner-name`, so it must be a valid label value. |
 | Roles | One role, `invoke`: call the model through the AI Gateway. The role catalog leaves room for quota tiers later. |
 | Password (generated or `passwordSecretRef`) | The API key, generated as `oe_sk_<random>`. The plugin API never accepts a chosen key, because a key that repeats another one disables both (6.1). A `passwordSecretRef` (kubectl only) must hold 32 to 128 printable characters. |
