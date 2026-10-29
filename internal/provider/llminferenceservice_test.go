@@ -344,15 +344,71 @@ func TestValidateLLMLocalModelCache(t *testing.T) {
 	}
 }
 
+func TestValidateLLMLocalModelCacheServiceAccountAuthorization(t *testing.T) {
+	t.Setenv("LOCAL_MODEL_ENABLED", "true")
+	cases := []struct {
+		name               string
+		serviceAccountName string
+		jobNamespace       string
+		binding            string
+		create             bool
+		wantErr            string
+	}{
+		{name: "anonymous"},
+		{name: "authorized", serviceAccountName: "model-puller", binding: "ns", create: true},
+		{name: "missing", serviceAccountName: "model-puller", wantErr: "was not found"},
+		{name: "unbound", serviceAccountName: "model-puller", create: true, wantErr: "is missing required annotation"},
+		{name: "wrong tenant", serviceAccountName: "model-puller", binding: "other-ns", create: true, wantErr: "not Instance namespace"},
+		{name: "custom job namespace", serviceAccountName: "model-puller", jobNamespace: "custom-jobs", binding: "ns", create: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(localModelJobNamespaceEnv, tc.jobNamespace)
+			scheme := localModelCacheTestScheme(t)
+			builder := fake.NewClientBuilder().WithScheme(scheme)
+			if tc.create {
+				namespace := tc.jobNamespace
+				if namespace == "" {
+					namespace = defaultLocalModelJobNamespace
+				}
+				builder = builder.WithObjects(&corev1.ServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        tc.serviceAccountName,
+						Namespace:   namespace,
+						Annotations: map[string]string{localModelInstanceNamespaceAnnotation: tc.binding},
+					},
+				})
+			}
+
+			params := components.VllmCustomSpec{
+				LocalModelCache: &components.LocalModelCacheSpec{
+					Enabled:            true,
+					ModelSize:          "2Gi",
+					NodeGroup:          "model-workers",
+					ServiceAccountName: tc.serviceAccountName,
+				},
+			}
+			inst := llmContext(t, nil, params, llm.LlmTopologyParameters{}).Instance()
+			c := controller.NewContext(context.Background(), builder.Build(), inst, common.ProviderName)
+			err := validateLLM(c)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "llmEngine.parameters.localModelCache.serviceAccountName") ||
+				!strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("validateLLM() error = %v, want field-specific error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestSyncLocalModelCache(t *testing.T) {
 	t.Setenv("LOCAL_MODEL_ENABLED", "true")
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	if err := kservev1alpha2.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv(localModelJobNamespaceEnv, "")
+	scheme := localModelCacheTestScheme(t)
 
 	params := components.VllmCustomSpec{
 		ModelURI: "hf://org/model",
@@ -364,7 +420,14 @@ func TestSyncLocalModelCache(t *testing.T) {
 		},
 	}
 	inst := llmContext(t, nil, params, llm.LlmTopologyParameters{}).Instance()
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "model-puller",
+			Namespace:   defaultLocalModelJobNamespace,
+			Annotations: map[string]string{localModelInstanceNamespaceAnnotation: inst.Namespace},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(serviceAccount).Build()
 	c := controller.NewContext(context.Background(), cl, inst, common.ProviderName)
 
 	ready, err := syncLocalModelCache(c, params)
@@ -431,6 +494,58 @@ func TestSyncLocalModelCache(t *testing.T) {
 	ready, err = syncLocalModelCache(c, disabled)
 	if err != nil || !ready {
 		t.Fatalf("disabled cache after cleanup: ready=%v err=%v", ready, err)
+	}
+}
+
+func TestSyncLocalModelCacheRejectsUnauthorizedServiceAccountBeforeMutation(t *testing.T) {
+	t.Setenv("LOCAL_MODEL_ENABLED", "true")
+	t.Setenv(localModelJobNamespaceEnv, "")
+	scheme := localModelCacheTestScheme(t)
+	params := components.VllmCustomSpec{
+		ModelURI: "hf://org/new",
+		LocalModelCache: &components.LocalModelCacheSpec{
+			Enabled:            true,
+			ModelSize:          "2Gi",
+			NodeGroup:          "model-workers",
+			ServiceAccountName: "missing-puller",
+		},
+	}
+	inst := llmContext(t, nil, params, llm.LlmTopologyParameters{}).Instance()
+	cache := localModelNamespaceCacheForTest("hf://org/old")
+	controlLocalModelNamespaceCache(cache, inst)
+	llmisvc := &kservev1alpha2.LLMInferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        inst.Name,
+			Namespace:   inst.Namespace,
+			Annotations: map[string]string{"test": "unchanged"},
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cache, llmisvc).Build()
+	c := controller.NewContext(context.Background(), cl, inst, common.ProviderName)
+
+	ready, err := syncLocalModelCache(c, params)
+	if err == nil || !strings.Contains(err.Error(), "llmEngine.parameters.localModelCache.serviceAccountName") ||
+		!strings.Contains(err.Error(), "was not found") {
+		t.Fatalf("syncLocalModelCache() error = %v, want missing ServiceAccount error", err)
+	}
+	if ready {
+		t.Fatal("unauthorized cache request should not be ready")
+	}
+
+	gotCache := unstructuredObject(localModelNamespaceCacheGVK)
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(cache), gotCache); err != nil {
+		t.Fatalf("owned cache was removed: %v", err)
+	}
+	sourceURI, _, err := unstructured.NestedString(gotCache.Object, "spec", "sourceModelUri")
+	if err != nil || sourceURI != "hf://org/old" {
+		t.Fatalf("owned cache changed: sourceModelUri=%q err=%v", sourceURI, err)
+	}
+	gotLLM := &kservev1alpha2.LLMInferenceService{}
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(llmisvc), gotLLM); err != nil {
+		t.Fatalf("LLMInferenceService was removed: %v", err)
+	}
+	if gotLLM.Annotations["test"] != "unchanged" {
+		t.Fatalf("LLMInferenceService changed: annotations=%v", gotLLM.Annotations)
 	}
 }
 

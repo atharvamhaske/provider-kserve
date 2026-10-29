@@ -2,6 +2,7 @@ package provider
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -68,6 +69,10 @@ const (
 	// gpuLibraryPathEnv for the full rationale.
 	gpuLibraryPathEnvVar = "LIBRARY_PATH"
 	gpuLibraryPathValue  = "/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
+
+	localModelJobNamespaceEnv             = "LOCAL_MODEL_JOB_NAMESPACE"
+	defaultLocalModelJobNamespace         = "kserve-localmodel-jobs"
+	localModelInstanceNamespaceAnnotation = "openeverest.io/instance-namespace"
 )
 
 var (
@@ -228,6 +233,9 @@ func validateLLM(c *controller.Context) error {
 	if err := validateLocalModelCache(params); err != nil {
 		return err
 	}
+	if err := authorizeLocalModelCacheServiceAccount(c, params); err != nil {
+		return err
+	}
 	return validateLoRAParams(c.Name(), params)
 }
 
@@ -265,6 +273,47 @@ func validateLocalModelCache(params components.VllmCustomSpec) error {
 		if problems := validation.IsDNS1123Subdomain(serviceAccount); len(problems) > 0 {
 			return fmt.Errorf("%s.serviceAccountName %q is invalid: %s", field, cache.ServiceAccountName, strings.Join(problems, "; "))
 		}
+	}
+	return nil
+}
+
+func localModelJobNamespace() string {
+	if namespace := strings.TrimSpace(os.Getenv(localModelJobNamespaceEnv)); namespace != "" {
+		return namespace
+	}
+	return defaultLocalModelJobNamespace
+}
+
+func authorizeLocalModelCacheServiceAccount(c *controller.Context, params components.VllmCustomSpec) error {
+	cache := params.LocalModelCache
+	if cache == nil || !cache.Enabled {
+		return nil
+	}
+	serviceAccountName := strings.TrimSpace(cache.ServiceAccountName)
+	if serviceAccountName == "" {
+		return nil
+	}
+
+	const field = "llmEngine.parameters.localModelCache.serviceAccountName"
+	jobNamespace := localModelJobNamespace()
+	serviceAccount := &corev1.ServiceAccount{}
+	key := types.NamespacedName{Name: serviceAccountName, Namespace: jobNamespace}
+	if err := c.Client().Get(c.Context(), key, serviceAccount); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%s %q was not found in shared job namespace %q", field, serviceAccountName, jobNamespace)
+		}
+		return fmt.Errorf("getting %s %q from shared job namespace %q: %w", field, serviceAccountName, jobNamespace, err)
+	}
+
+	instanceNamespace := serviceAccount.Annotations[localModelInstanceNamespaceAnnotation]
+	if strings.TrimSpace(instanceNamespace) == "" {
+		return fmt.Errorf("%s %q is missing required annotation %q", field, serviceAccountName, localModelInstanceNamespaceAnnotation)
+	}
+	if instanceNamespace != c.Namespace() {
+		return fmt.Errorf(
+			"%s %q annotation %q binds it to namespace %q, not Instance namespace %q",
+			field, serviceAccountName, localModelInstanceNamespaceAnnotation, instanceNamespace, c.Namespace(),
+		)
 	}
 	return nil
 }
@@ -1036,6 +1085,9 @@ func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec
 	enabled := params.LocalModelCache != nil && params.LocalModelCache.Enabled
 	if !common.LocalModelEnabled() && enabled {
 		return false, fmt.Errorf("local model cache requires kserveResources.kserve.localmodel.enabled in the provider chart")
+	}
+	if err := authorizeLocalModelCacheServiceAccount(c, params); err != nil {
+		return false, err
 	}
 
 	cache := unstructuredObject(localModelNamespaceCacheGVK)
