@@ -464,8 +464,17 @@ kserveResources:
       enabled: true
     # -- Deploy KServe's LocalModel controller and node agent, and enable
     # automatic cache matching for InferenceService and LLMInferenceService.
+    storage:
+      resources:
+        limits:
+          # -- LocalModel download Jobs use this KServe setting rather than
+          # storageInitializer.resources above.
+          memory: 4Gi
     localmodel:
       enabled: false
+      # -- Namespace where KServe runs model download Jobs and resolves their
+      # credential ServiceAccounts.
+      jobNamespace: kserve-localmodel-jobs
     controller:
       # -- Cluster-wide default deployment mode. Standard (formerly named
       # "RawDeployment") yields plain Kubernetes Deployments + HPA and avoids

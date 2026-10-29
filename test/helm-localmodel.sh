@@ -9,11 +9,15 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 DEFAULT_MANIFEST="$TMP_DIR/default.yaml"
 ENABLED_MANIFEST="$TMP_DIR/enabled.yaml"
+CUSTOM_MANIFEST="$TMP_DIR/custom.yaml"
 
 helm lint "$CHART" >/dev/null
 helm template provider-kserve "$CHART" >"$DEFAULT_MANIFEST"
 helm template provider-kserve "$CHART" \
   --set kserveResources.kserve.localmodel.enabled=true >"$ENABLED_MANIFEST"
+helm template provider-kserve "$CHART" \
+  --set kserveResources.kserve.localmodel.enabled=true \
+  --set kserveResources.kserve.localmodel.jobNamespace=tenant-downloads >"$CUSTOM_MANIFEST"
 
 resource_name() {
   kind=$1
@@ -81,6 +85,26 @@ if [ "$("$YQ_BIN" ea -r 'select(.kind == "ConfigMap" and .metadata.name == "infe
 fi
 if [ "$(provider_env LOCAL_MODEL_ENABLED "$ENABLED_MANIFEST")" != "true" ]; then
   echo "Provider LocalModel feature flag is not enabled" >&2
+  exit 1
+fi
+if [ "$(provider_env LOCAL_MODEL_JOB_NAMESPACE "$ENABLED_MANIFEST")" != "kserve-localmodel-jobs" ]; then
+  echo "Provider LocalModel job namespace does not match KServe" >&2
+  exit 1
+fi
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "ConfigMap" and .metadata.name == "inferenceservice-config") | .data.localModel | from_json | .jobNamespace' "$ENABLED_MANIFEST")" != "kserve-localmodel-jobs" ]; then
+  echo "KServe LocalModel job namespace is not configured" >&2
+  exit 1
+fi
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "ConfigMap" and .metadata.name == "inferenceservice-config") | .data.storageInitializer | from_json | .memoryLimit' "$ENABLED_MANIFEST")" != "4Gi" ]; then
+  echo "KServe LocalModel download memory limit is not configured" >&2
+  exit 1
+fi
+if [ "$(provider_env LOCAL_MODEL_JOB_NAMESPACE "$CUSTOM_MANIFEST")" != "tenant-downloads" ]; then
+  echo "Provider LocalModel custom job namespace is not configured" >&2
+  exit 1
+fi
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "ConfigMap" and .metadata.name == "inferenceservice-config") | .data.localModel | from_json | .jobNamespace' "$CUSTOM_MANIFEST")" != "tenant-downloads" ]; then
+  echo "KServe LocalModel custom job namespace is not configured" >&2
   exit 1
 fi
 case "$(crd_hook_command "$ENABLED_MANIFEST")" in
