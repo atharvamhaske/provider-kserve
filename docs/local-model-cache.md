@@ -106,15 +106,15 @@ spec:
       parameters:
         modelURI: hf://HuggingFaceTB/SmolLM2-135M-Instruct
         localModelCache:
-          enabled: true
+          enabled: enabled
           modelSize: 1Gi
           nodeGroup: model-workers
           serviceAccountName: hf-downloader
 ```
 
 The provider creates a `LocalModelNamespaceCache` in the Instance namespace.
-Its name matches the Instance name, and the Instance owns it. Disable the form
-toggle to remove the cache and recreate the workload without cache admission.
+Its name matches the Instance name, and the Instance owns it. Select Disabled
+in the form to remove the cache and recreate the workload without cache admission.
 
 The cache URI always matches the Instance model URI. KServe admission adds
 cache labels and rewrites the workload to the cached PVC.

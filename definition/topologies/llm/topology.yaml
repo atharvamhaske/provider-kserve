@@ -291,12 +291,12 @@ ui:
           path: spec.components.llmEngine.parameters.localModelCache.enabled
           fieldParams:
             label: Enable model cache
-            defaultValue: false
+            defaultValue: disabled
             options:
             - label: Disabled
-              value: false
+              value: disabled
             - label: Enabled
-              value: true
+              value: enabled
             helperText: >-
               Reuses one downloaded model copy per matching node instead of
               downloading the model for every Pod.
@@ -311,7 +311,7 @@ ui:
           validation:
             min: 1
             celExpressions:
-            - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || !spec.components.llmEngine.parameters.localModelCache.enabled || has(spec.components.llmEngine.parameters.localModelCache.modelSize)'
+            - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || spec.components.llmEngine.parameters.localModelCache.enabled != "enabled" || has(spec.components.llmEngine.parameters.localModelCache.modelSize)'
               message: Model size is required when model caching is enabled
         nodeGroup:
           uiType: text
@@ -322,7 +322,7 @@ ui:
             helperText: Existing cluster-scoped node group that supplies cache storage.
           validation:
             celExpressions:
-            - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || !spec.components.llmEngine.parameters.localModelCache.enabled || has(spec.components.llmEngine.parameters.localModelCache.nodeGroup)'
+            - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || spec.components.llmEngine.parameters.localModelCache.enabled != "enabled" || has(spec.components.llmEngine.parameters.localModelCache.nodeGroup)'
               message: LocalModelNodeGroup is required when model caching is enabled
         serviceAccountName:
           uiType: text

@@ -303,7 +303,7 @@ func (c noMatchLocalModelClient) Get(
 
 func TestValidateLLMLocalModelCache(t *testing.T) {
 	valid := components.LocalModelCacheSpec{
-		Enabled:   true,
+		Enabled:   components.LocalModelCacheEnabled,
 		ModelSize: "2Gi",
 		NodeGroup: "model-workers",
 	}
@@ -315,11 +315,12 @@ func TestValidateLLMLocalModelCache(t *testing.T) {
 		wantErr      string
 	}{
 		{name: "chart disabled", cache: valid, wantErr: "requires kserveResources.kserve.localmodel.enabled"},
-		{name: "missing size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, NodeGroup: "model-workers"}, wantErr: "modelSize is required"},
-		{name: "invalid size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "large", NodeGroup: "model-workers"}, wantErr: "modelSize"},
-		{name: "zero size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "0", NodeGroup: "model-workers"}, wantErr: "greater than zero"},
-		{name: "missing node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "2Gi"}, wantErr: "nodeGroup is required"},
-		{name: "invalid node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: true, ModelSize: "2Gi", NodeGroup: "Not_Valid"}, wantErr: "nodeGroup"},
+		{name: "invalid mode", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: "sometimes"}, wantErr: `enabled must be "disabled" or "enabled"`},
+		{name: "missing size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: components.LocalModelCacheEnabled, NodeGroup: "model-workers"}, wantErr: "modelSize is required"},
+		{name: "invalid size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: components.LocalModelCacheEnabled, ModelSize: "large", NodeGroup: "model-workers"}, wantErr: "modelSize"},
+		{name: "zero size", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: components.LocalModelCacheEnabled, ModelSize: "0", NodeGroup: "model-workers"}, wantErr: "greater than zero"},
+		{name: "missing node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: components.LocalModelCacheEnabled, ModelSize: "2Gi"}, wantErr: "nodeGroup is required"},
+		{name: "invalid node group", chartEnabled: "true", cache: components.LocalModelCacheSpec{Enabled: components.LocalModelCacheEnabled, ModelSize: "2Gi", NodeGroup: "Not_Valid"}, wantErr: "nodeGroup"},
 		{name: "storage initializer disabled", chartEnabled: "true", cache: valid, disableSI: true, wantErr: "disableStorageInitializer must remain false"},
 		{name: "valid", chartEnabled: "true", cache: valid},
 	}
@@ -382,7 +383,7 @@ func TestValidateLLMLocalModelCacheServiceAccountAuthorization(t *testing.T) {
 
 			params := components.VllmCustomSpec{
 				LocalModelCache: &components.LocalModelCacheSpec{
-					Enabled:            true,
+					Enabled:            components.LocalModelCacheEnabled,
 					ModelSize:          "2Gi",
 					NodeGroup:          "model-workers",
 					ServiceAccountName: tc.serviceAccountName,
@@ -413,7 +414,7 @@ func TestSyncLocalModelCache(t *testing.T) {
 	params := components.VllmCustomSpec{
 		ModelURI: "hf://org/model",
 		LocalModelCache: &components.LocalModelCacheSpec{
-			Enabled:            true,
+			Enabled:            components.LocalModelCacheEnabled,
 			ModelSize:          "2Gi",
 			NodeGroup:          "model-workers",
 			ServiceAccountName: "model-puller",
@@ -504,7 +505,7 @@ func TestSyncLocalModelCacheRejectsUnauthorizedServiceAccountBeforeMutation(t *t
 	params := components.VllmCustomSpec{
 		ModelURI: "hf://org/new",
 		LocalModelCache: &components.LocalModelCacheSpec{
-			Enabled:            true,
+			Enabled:            components.LocalModelCacheEnabled,
 			ModelSize:          "2Gi",
 			NodeGroup:          "model-workers",
 			ServiceAccountName: "missing-puller",
@@ -570,7 +571,7 @@ func TestSyncLocalModelCacheReplacesImmutableURI(t *testing.T) {
 	params := components.VllmCustomSpec{
 		ModelURI: "hf://org/new",
 		LocalModelCache: &components.LocalModelCacheSpec{
-			Enabled:   true,
+			Enabled:   components.LocalModelCacheEnabled,
 			ModelSize: "2Gi",
 			NodeGroup: "model-workers",
 		},
@@ -683,7 +684,7 @@ func TestSyncLocalModelCacheChartDisabledCleanup(t *testing.T) {
 		params := components.VllmCustomSpec{
 			ModelURI: "hf://org/model",
 			LocalModelCache: &components.LocalModelCacheSpec{
-				Enabled:   true,
+				Enabled:   components.LocalModelCacheEnabled,
 				ModelSize: "2Gi",
 				NodeGroup: "model-workers",
 			},
@@ -774,7 +775,7 @@ func TestLocalModelCacheOwnershipProtection(t *testing.T) {
 				params := components.VllmCustomSpec{
 					ModelURI: operation.desiredURI,
 					LocalModelCache: &components.LocalModelCacheSpec{
-						Enabled:   true,
+						Enabled:   components.LocalModelCacheEnabled,
 						ModelSize: "2Gi",
 						NodeGroup: "model-workers",
 					},

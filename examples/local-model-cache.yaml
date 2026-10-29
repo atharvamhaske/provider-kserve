@@ -65,6 +65,6 @@ spec:
         computeProfile: cpu
         # Leave disableStorageInitializer unset. KServe uses that path to mount the cache.
         localModelCache:
-          enabled: true
+          enabled: enabled
           modelSize: 1Gi
           nodeGroup: model-workers

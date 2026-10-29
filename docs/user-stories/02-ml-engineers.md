@@ -111,7 +111,7 @@ spec:
       parameters:
         modelURI: hf://Qwen/Qwen3-4B
         localModelCache:
-          enabled: true
+          enabled: enabled
           modelSize: 10Gi
           nodeGroup: model-workers
 ```

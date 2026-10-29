@@ -151,7 +151,7 @@ spec:
             content: |
               set -eu
               kubectl -n "$NAMESPACE" patch instance cached-smollm --type=merge \
-                -p '{"spec":{"components":{"llmEngine":{"parameters":{"localModelCache":{"enabled":false}}}}}}'
+                -p '{"spec":{"components":{"llmEngine":{"parameters":{"localModelCache":{"enabled":"disabled"}}}}}}'
               attempt=0
               while [ "$attempt" -lt 60 ]; do
                 cache=$(kubectl -n "$NAMESPACE" get localmodelnamespacecache cached-smollm --ignore-not-found -o name)

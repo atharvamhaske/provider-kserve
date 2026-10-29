@@ -74,8 +74,8 @@ if [ "$("$YQ_BIN" ea -r 'select(.kind == "Provider") | .spec.uiSchema.llm.sectio
   echo "Provider cache enable control is not renderable by the OpenEverest form" >&2
   exit 1
 fi
-if [ "$("$YQ_BIN" ea -r 'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.cacheEnabled.fieldParams.options[1].value' "$DEFAULT_MANIFEST")" != "true" ]; then
-  echo "Provider cache enable control does not emit a boolean" >&2
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.cacheEnabled.fieldParams.options[1].value' "$DEFAULT_MANIFEST")" != "enabled" ]; then
+  echo "Provider cache enable control does not emit the enabled mode" >&2
   exit 1
 fi
 

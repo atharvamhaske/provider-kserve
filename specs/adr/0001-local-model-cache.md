@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-29
-- Implementation baseline: `feat/localmodel-cache` at `0761c25591bd529e820c0eb45f3ef8ab9841c402`
+- Implementation baseline: `feat/localmodel-cache`
 - KServe baseline: `v0.21.0` at `d1482554fc4f66dd41aee70e01f5174e24f265bd`
 
 ## Context
@@ -31,9 +31,9 @@ The provider enforces tenant authorization for every referenced download Service
 
 3. The feature is limited to the LLM topology. No OpenEverest core or UI source change is required. The provider definition adds a Model Cache section that the existing UI renderer consumes.
 
-   The UI-schema component key is `cacheEnabled`, while its API path remains `localModelCache.enabled`. OpenEverest `2.0.0-dev.2` omits `uiType: toggle` controls from form steps. This field uses a select with Boolean Enabled and Disabled values so the existing renderer exposes it without a core/UI change.
+   The UI-schema component key is `cacheEnabled`, while its API path remains `localModelCache.enabled`. OpenEverest `2.0.0-dev.2` omits `uiType: toggle` controls from form steps. A select renders, but Boolean option values fail form validation with `Expected string, received boolean`. The field therefore uses the string enum `disabled` or `enabled`. This preserves the provider-only integration boundary and matches the existing `ExpertParallel` and `LoraDeployment` conventions.
 
-4. `llmEngine.parameters.localModelCache` contains `enabled`, `modelSize`, `nodeGroup`, and optional `serviceAccountName`. The UI accepts `modelSize` as a number in Gi and emits a Kubernetes quantity. API clients may submit any positive Kubernetes quantity.
+4. `llmEngine.parameters.localModelCache` contains the `disabled` or `enabled` string, `modelSize`, `nodeGroup`, and optional `serviceAccountName`. An omitted or empty enable mode is disabled. Other values fail provider validation. The UI accepts `modelSize` as a number in Gi and emits a Kubernetes quantity. API clients may submit any positive Kubernetes quantity.
 
 5. Enabling a cache requires chart support, a positive `modelSize`, one valid DNS node-group name, and `disableStorageInitializer=false`. An optional ServiceAccount name must be a valid DNS subdomain.
 

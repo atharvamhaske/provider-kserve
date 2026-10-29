@@ -40,8 +40,8 @@ type LoRASpec struct {
 // LocalModelCacheSpec configures an Instance-owned KServe
 // LocalModelNamespaceCache for the base model.
 type LocalModelCacheSpec struct {
-	// Enabled creates and maintains the cache.
-	Enabled bool `json:"enabled,omitempty"`
+	// Enabled selects whether the cache is maintained: "disabled" (default) or "enabled".
+	Enabled string `json:"enabled,omitempty"`
 
 	// ModelSize is the storage required for one model copy, for example "10Gi".
 	ModelSize string `json:"modelSize,omitempty"`
@@ -172,6 +172,11 @@ type VllmCustomSpec struct {
 const (
 	LoraDeploymentDisabled = "disabled"
 	LoraDeploymentEnabled  = "enabled"
+)
+
+const (
+	LocalModelCacheDisabled = "disabled"
+	LocalModelCacheEnabled  = "enabled"
 )
 
 const (

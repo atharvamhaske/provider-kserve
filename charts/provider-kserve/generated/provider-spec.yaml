@@ -41,7 +41,7 @@ spec:
             localModelCache:
               properties:
                 enabled:
-                  type: boolean
+                  type: string
                 modelSize:
                   type: string
                 nodeGroup:
@@ -545,14 +545,14 @@ spec:
           components:
             cacheEnabled:
               fieldParams:
-                defaultValue: false
+                defaultValue: disabled
                 helperText: Reuses one downloaded model copy per matching node instead of downloading the model for every Pod.
                 label: Enable model cache
                 options:
                   - label: Disabled
-                    value: false
+                    value: disabled
                   - label: Enabled
-                    value: true
+                    value: enabled
               path: spec.components.llmEngine.parameters.localModelCache.enabled
               uiType: select
             modelSize:
@@ -565,7 +565,7 @@ spec:
               uiType: number
               validation:
                 celExpressions:
-                  - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || !spec.components.llmEngine.parameters.localModelCache.enabled || has(spec.components.llmEngine.parameters.localModelCache.modelSize)'
+                  - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || spec.components.llmEngine.parameters.localModelCache.enabled != "enabled" || has(spec.components.llmEngine.parameters.localModelCache.modelSize)'
                     message: Model size is required when model caching is enabled
                 min: 1
             nodeGroup:
@@ -577,7 +577,7 @@ spec:
               uiType: text
               validation:
                 celExpressions:
-                  - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || !spec.components.llmEngine.parameters.localModelCache.enabled || has(spec.components.llmEngine.parameters.localModelCache.nodeGroup)'
+                  - celExpr: '!has(spec.components.llmEngine.parameters.localModelCache) || spec.components.llmEngine.parameters.localModelCache.enabled != "enabled" || has(spec.components.llmEngine.parameters.localModelCache.nodeGroup)'
                     message: LocalModelNodeGroup is required when model caching is enabled
             serviceAccountName:
               fieldParams:

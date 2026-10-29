@@ -239,12 +239,23 @@ func validateLLM(c *controller.Context) error {
 	return validateLoRAParams(c.Name(), params)
 }
 
+func localModelCacheEnabled(cache *components.LocalModelCacheSpec) bool {
+	return cache != nil && strings.EqualFold(strings.TrimSpace(cache.Enabled), components.LocalModelCacheEnabled)
+}
+
 func validateLocalModelCache(params components.VllmCustomSpec) error {
 	cache := params.LocalModelCache
-	if cache == nil || !cache.Enabled {
+	if cache == nil {
 		return nil
 	}
 	const field = "llmEngine.parameters.localModelCache"
+	switch strings.ToLower(strings.TrimSpace(cache.Enabled)) {
+	case "", components.LocalModelCacheDisabled:
+		return nil
+	case components.LocalModelCacheEnabled:
+	default:
+		return fmt.Errorf("%s.enabled must be %q or %q", field, components.LocalModelCacheDisabled, components.LocalModelCacheEnabled)
+	}
 	if !common.LocalModelEnabled() {
 		return fmt.Errorf("%s.enabled requires kserveResources.kserve.localmodel.enabled in the provider chart", field)
 	}
@@ -286,7 +297,7 @@ func localModelJobNamespace() string {
 
 func authorizeLocalModelCacheServiceAccount(c *controller.Context, params components.VllmCustomSpec) error {
 	cache := params.LocalModelCache
-	if cache == nil || !cache.Enabled {
+	if !localModelCacheEnabled(cache) {
 		return nil
 	}
 	serviceAccountName := strings.TrimSpace(cache.ServiceAccountName)
@@ -1082,7 +1093,7 @@ func deleteLLMForCacheTransition(c *controller.Context) (bool, error) {
 // workload is admitted. It returns false while deleting the workload before a
 // stale cache because KServe protects caches that are still in use.
 func syncLocalModelCache(c *controller.Context, params components.VllmCustomSpec) (bool, error) {
-	enabled := params.LocalModelCache != nil && params.LocalModelCache.Enabled
+	enabled := localModelCacheEnabled(params.LocalModelCache)
 	if !common.LocalModelEnabled() && enabled {
 		return false, fmt.Errorf("local model cache requires kserveResources.kserve.localmodel.enabled in the provider chart")
 	}
