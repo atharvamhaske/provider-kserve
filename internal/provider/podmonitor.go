@@ -99,6 +99,8 @@ func newPodMonitor(instanceName, namespace string, selector map[string]string, e
 		"metadata": map[string]any{
 			"name":      knativekmeta.ChildName(instanceName, podMonitorSuffix),
 			"namespace": namespace,
+			// Lets consumers such as plugin-metrics find an Instance's monitors.
+			"labels": map[string]any{controller.InstanceLabel: instanceName},
 		},
 		"spec": map[string]any{
 			// No namespaceSelector: the default restricts to the PodMonitor's
