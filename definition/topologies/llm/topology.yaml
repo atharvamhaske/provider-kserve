@@ -339,8 +339,8 @@ ui:
           groupType: bordered
           label: Precision
           description: >-
-            Leave Quantization empty for pre-quantized checkpoints (AWQ, GPTQ,
-            FP8): vLLM detects them on its own.
+            Keep Quantization on vLLM default for pre-quantized checkpoints
+            (AWQ, GPTQ, FP8): vLLM detects them on its own.
           components:
             types:
               uiType: group
@@ -354,8 +354,8 @@ ui:
                     displayEmpty: true
                     helperText: --dtype
                     options:
-                    - label: auto
-                      value: auto
+                    - label: vLLM default
+                      value: ""
                     - label: bfloat16
                       value: bfloat16
                     - label: float16
@@ -370,6 +370,8 @@ ui:
                     displayEmpty: true
                     helperText: --quantization
                     options:
+                    - label: vLLM default
+                      value: ""
                     - label: FP8 (on load, Ada/Hopper+)
                       value: fp8
                     - label: bitsandbytes 4-bit (on load)
@@ -388,8 +390,8 @@ ui:
                     displayEmpty: true
                     helperText: --kv-cache-dtype. FP8 fits about twice the tokens.
                     options:
-                    - label: auto
-                      value: auto
+                    - label: vLLM default
+                      value: ""
                     - label: fp8
                       value: fp8
                     - label: fp8_e4m3

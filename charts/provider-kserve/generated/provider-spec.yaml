@@ -729,8 +729,8 @@ spec:
                         helperText: --dtype
                         label: Weights dtype
                         options:
-                          - label: auto
-                            value: auto
+                          - label: vLLM default
+                            value: ""
                           - label: bfloat16
                             value: bfloat16
                           - label: float16
@@ -745,8 +745,8 @@ spec:
                         helperText: --kv-cache-dtype. FP8 fits about twice the tokens.
                         label: KV cache dtype
                         options:
-                          - label: auto
-                            value: auto
+                          - label: vLLM default
+                            value: ""
                           - label: fp8
                             value: fp8
                           - label: fp8_e4m3
@@ -761,6 +761,8 @@ spec:
                         helperText: --quantization
                         label: Quantization
                         options:
+                          - label: vLLM default
+                            value: ""
                           - label: FP8 (on load, Ada/Hopper+)
                             value: fp8
                           - label: bitsandbytes 4-bit (on load)
@@ -779,7 +781,7 @@ spec:
                     - kvCacheDtype
                   groupType: line
                   uiType: group
-              description: 'Leave Quantization empty for pre-quantized checkpoints (AWQ, GPTQ, FP8): vLLM detects them on its own.'
+              description: 'Keep Quantization on vLLM default for pre-quantized checkpoints (AWQ, GPTQ, FP8): vLLM detects them on its own.'
               groupType: bordered
               label: Precision
               uiType: group
