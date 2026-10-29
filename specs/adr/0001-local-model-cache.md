@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-29
-- Implementation baseline: `feat/localmodel-cache` at `c130c1ca40a2e39977e6e061967c9bf8d7bd6625`
+- Implementation baseline: `feat/localmodel-cache` at `0761c25591bd529e820c0eb45f3ef8ab9841c402`
 - KServe baseline: `v0.21.0` at `d1482554fc4f66dd41aee70e01f5174e24f265bd`
 
 ## Context
@@ -21,7 +21,7 @@ Adopt KServe LocalModel for LLM Instances as an optional feature. Use an Instanc
 
 Accept the official upstream KServe LocalModel RBAC boundary without forking its chart. This acceptance applies only because LocalModel is opt-in and disabled by default. The residual cluster-wide credential and Job risk remains explicit.
 
-Require tenant authorization for every referenced download ServiceAccount. The current implementation does not perform this authorization, so this requirement is pending implementation and blocks production multi-tenant use of credentialed caches.
+The provider enforces tenant authorization for every referenced download ServiceAccount before it changes a cache or workload.
 
 ## Detailed decisions
 
@@ -39,29 +39,29 @@ Require tenant authorization for every referenced download ServiceAccount. The c
 
 7. The provider writes exactly one administrator-created `LocalModelNodeGroup` into `spec.nodeGroups`. It does not create, update, or delete node groups. Node labels, local storage, PV policy, and capacity remain administrator concerns.
 
-8. Download Secrets and ServiceAccounts remain in KServe's configured job namespace, normally `kserve-localmodel-jobs`. The provider writes only `serviceAccountName`; it does not copy Secrets from the Instance namespace.
+8. Download Secrets and ServiceAccounts remain in KServe's configured job namespace, normally `kserve-localmodel-jobs`. The chart passes that namespace to the provider as `LOCAL_MODEL_JOB_NAMESPACE`. The provider writes only `serviceAccountName`; it does not copy Secrets from the Instance namespace.
 
-9. A referenced download ServiceAccount MUST be authorized for the Instance tenant before reconciliation creates or updates the cache. The Instance namespace is the tenant boundary available without core changes.
+9. A referenced download ServiceAccount MUST carry the administrator-controlled `openeverest.io/instance-namespace` annotation. Its value MUST equal the Instance namespace. The provider rejects an absent, unbound, or differently bound ServiceAccount during validation and again before cache reconciliation.
 
-   The authorization binding MUST be controlled by a cluster administrator, not by the Instance author. The provider MUST reject an absent, unbound, or differently bound ServiceAccount. A DNS-name check is not authorization.
+   Public models may omit `serviceAccountName`. Tenant binding limits which credential set a tenant may select, but it does not reduce the node agent's own RBAC if that agent is compromised.
 
-   This rule is pending at the implementation baseline. Public models may omit `serviceAccountName`. Tenant binding limits which credential set a tenant may select, but it does not reduce the node agent's own RBAC if that agent is compromised.
+10. The chart raises KServe's LocalModel download-job memory limit from 1 GiB to 4 GiB. The 1 GiB upstream default OOM-killed the 135M-parameter end-to-end model download.
 
-10. The storage initializer setting must remain enabled on the requested LLM service. KServe performs LocalModel matching in that path, then admission replaces the download path with the cached PVC. The admitted model pod therefore has no storage-initializer container.
+11. The storage initializer setting must remain enabled on the requested LLM service. KServe performs LocalModel matching in that path, then admission replaces the download path with the cached PVC. The admitted model pod therefore has no storage-initializer container.
 
-11. The provider may apply mutable cache fields in place only while the existing cache has the same source URI and the expected Instance controller owner. It rejects unowned or foreign-owned same-name resources without changing either the cache or workload.
+12. The provider may apply mutable cache fields in place only while the existing cache has the same source URI and the expected Instance controller owner. It rejects unowned or foreign-owned same-name resources without changing either the cache or workload.
 
-12. `sourceModelUri` is immutable upstream. A URI change, cache disable, chart-disable cleanup, or Instance deletion follows three reconciles: delete the `LLMInferenceService`, delete the owned cache after the workload is absent, then create the desired cache or uncached workload.
+13. `sourceModelUri` is immutable upstream. A URI change, cache disable, chart-disable cleanup, or Instance deletion follows three reconciles: delete the `LLMInferenceService`, delete the owned cache after the workload is absent, then create the desired cache or uncached workload.
 
-13. Workload-first deletion is required because KServe rejects deletion of a cache referenced by an `InferenceService` or `LLMInferenceService`. Provider cleanup returns a wait result after requesting workload deletion.
+14. Workload-first deletion is required because KServe rejects deletion of a cache referenced by an `InferenceService` or `LLMInferenceService`. Provider cleanup returns a wait result after requesting workload deletion.
 
-14. The provider watches owned namespace caches only when LocalModel is enabled. A missing LocalModel CRD is harmless when caching is disabled. A request to enable caching still fails if chart support is off.
+15. The provider watches owned namespace caches only when LocalModel is enabled. A missing LocalModel CRD is harmless when caching is disabled. A request to enable caching still fails if chart support is off.
 
-15. The provider may read cluster-scoped `LocalModelCache` objects for status but does not manage them. It has create, update, patch, and delete access only for namespace-cache reconciliation.
+16. The provider may read cluster-scoped `LocalModelCache` objects for status but does not manage them. It has create, update, patch, and delete access only for namespace-cache reconciliation.
 
-16. Instance readiness remains the workload's readiness. Cache state is appended to the Instance message as preparing, missing, ready copies, or failed copies. A cache message does not hide the endpoint or change a Ready workload to Provisioning.
+17. Instance readiness remains the workload's readiness. Cache state is appended to the Instance message as preparing, missing, ready copies, or failed copies. A cache message does not hide the endpoint or change a Ready workload to Provisioning.
 
-17. Unit tests cover validation, create and apply, immutable-URI replacement, disable and chart-disable cleanup, staged Instance cleanup, owner rejection, and status messages. Helm tests cover disabled and enabled renders. The end-to-end test proves PVC admission, pod reuse without another download Job, status propagation, and clean disable.
+18. Unit tests cover validation, create and apply, immutable-URI replacement, disable and chart-disable cleanup, staged Instance cleanup, owner rejection, credential authorization, and status messages. Helm tests cover disabled and enabled renders. The end-to-end test proves PVC admission, pod reuse without another download Job, status propagation, and clean disable.
 
 ## Security boundary
 
@@ -119,7 +119,7 @@ Operators must install local storage, label nodes, create the job namespace, pro
 
 The provider gains a dependency on KServe LocalModel `v1alpha1` APIs and upstream labels and status fields. A KServe upgrade requires compatibility, RBAC, authorization, size-limit, and deletion-lifecycle review.
 
-Credentialed multi-tenant caches are not production-ready at this baseline because tenant-bound ServiceAccount authorization is pending. Public caches without `serviceAccountName` do not cross this credential-selection boundary.
+Credentialed multi-tenant caches require administrators to bind each shared download ServiceAccount to one Instance namespace. Public caches may omit `serviceAccountName`.
 
 ## Release review
 
@@ -189,13 +189,12 @@ kubectl -n "$NS" get llminferenceservice "$INSTANCE" \
 kubectl -n "$NS" get instance "$INSTANCE" -o jsonpath='{.status.message}{"\n"}'
 ```
 
-Tenant-bound ServiceAccount authorization is pending. Its implementation MUST add and pass a named positive and cross-tenant negative test. This command fails if the required test is absent:
+Tenant-bound ServiceAccount authorization has positive, missing, unbound, cross-tenant, custom-namespace, and no-mutation regression cases:
 
 ```bash
-go test ./internal/provider -list . | \
-  grep -qx TestValidateLLMLocalModelCacheServiceAccountAuthorization
 go test ./internal/provider \
-  -run '^TestValidateLLMLocalModelCacheServiceAccountAuthorization$' -count=1
+  -run 'TestValidateLLMLocalModelCacheServiceAccountAuthorization|TestSyncLocalModelCacheRejectsUnauthorizedServiceAccountBeforeMutation' \
+  -count=1
 ```
 
 Recheck the official release and tag before any KServe upgrade:

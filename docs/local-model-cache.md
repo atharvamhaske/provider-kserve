@@ -15,7 +15,9 @@ helm upgrade --install provider-kserve \
   --set kserveResources.kserve.localmodel.enabled=true
 ```
 
-Create the namespace that runs model download Jobs:
+Create the namespace that runs model download Jobs. The chart defaults to
+`kserve-localmodel-jobs`; set
+`kserveResources.kserve.localmodel.jobNamespace` when using another namespace.
 
 ```bash
 kubectl create namespace kserve-localmodel-jobs
@@ -73,13 +75,18 @@ kind: ServiceAccount
 metadata:
   name: hf-downloader
   namespace: kserve-localmodel-jobs
+  annotations:
+    openeverest.io/instance-namespace: models
 secrets:
   - name: hf-secret
 ```
 
 Set `llmEngine.parameters.localModelCache.serviceAccountName` to
-`hf-downloader` on the Instance. The provider writes that reference to the
-cache. It does not copy Instance namespace Secrets into the job namespace.
+`hf-downloader` on an Instance in the `models` namespace. The provider reads
+the ServiceAccount from the configured job namespace and requires its
+`openeverest.io/instance-namespace` annotation to match the Instance namespace.
+An absent, unbound, or differently bound ServiceAccount is rejected before the
+provider changes the cache or workload. The provider does not copy Secrets.
 
 ## Configure an Instance cache
 
@@ -117,6 +124,12 @@ the cache rewrite inside the storage initialization path.
 
 The first cache population still downloads the model. Later Pods reuse the
 node-local copy.
+
+The chart gives KServe download Jobs a 4 GiB memory limit. This overrides
+KServe's 1 GiB default, which is insufficient for the end-to-end model download.
+
+Architecture and security decisions are recorded in
+[`specs/adr/0001-local-model-cache.md`](../specs/adr/0001-local-model-cache.md).
 
 ## Check cache state
 
