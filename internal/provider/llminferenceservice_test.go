@@ -375,25 +375,24 @@ func TestValidateLLMScaling(t *testing.T) {
 		}
 	})
 
-	t.Run("decode replicas with scaling", func(t *testing.T) {
+	// The UI always sends a replica count; autoscaling ignores it.
+	t.Run("decode replicas with scaling are accepted", func(t *testing.T) {
 		t.Parallel()
-		err := validateLLM(llmContext(t, ptr.To(int32(2)), components.VllmCustomSpec{
+		if err := validateLLM(llmContext(t, ptr.To(int32(2)), components.VllmCustomSpec{
 			MaxReplicas: ptr.To(int32(4)),
-		}, llm.LlmTopologyParameters{}))
-		if err == nil {
-			t.Fatal("expected error")
+		}, llm.LlmTopologyParameters{})); err != nil {
+			t.Fatal(err)
 		}
 	})
 
-	t.Run("prefill replicas with scaling", func(t *testing.T) {
+	t.Run("prefill replicas with scaling are accepted", func(t *testing.T) {
 		t.Parallel()
-		err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{
+		if err := validateLLM(llmContext(t, nil, components.VllmCustomSpec{}, llm.LlmTopologyParameters{
 			EnablePrefill:      true,
 			PrefillReplicas:    ptr.To(int32(3)),
 			PrefillMaxReplicas: ptr.To(int32(6)),
-		}))
-		if err == nil {
-			t.Fatal("expected error")
+		})); err != nil {
+			t.Fatal(err)
 		}
 	})
 
