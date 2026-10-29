@@ -178,9 +178,9 @@ type VllmCustomSpec struct {
 	LoraSlot3 string `json:"loraSlot3,omitempty"`
 
 	// MinReplicas is the WVA autoscaling floor for the decode workload.
-	// Setting MinReplicas or MaxReplicas enables KServe WorkloadSpec.Scaling
-	// (mutually exclusive with llmEngine.replicas). KServe requires ≥ 1;
-	// WVA does not scale to zero.
+	// Setting MinReplicas or MaxReplicas enables KServe WorkloadSpec.Scaling,
+	// and llmEngine.replicas is then ignored. KServe requires ≥ 1; WVA does
+	// not scale to zero.
 	MinReplicas *int32 `json:"minReplicas,omitempty"`
 
 	// MaxReplicas is the WVA autoscaling ceiling for the decode workload.

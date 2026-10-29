@@ -146,9 +146,9 @@ func validateLLM(c *controller.Context) error {
 	); err != nil {
 		return err
 	}
-	if comp.Replicas != nil && decode.enabled() {
-		return fmt.Errorf("%s.replicas cannot be set with minReplicas, maxReplicas, or scalingActuator", common.ComponentLlmEngine)
-	}
+	// replicas is ignored while autoscaling is on (buildLLMInferenceService
+	// uses spec.scaling instead). The UI always sends a replica count, so
+	// rejecting the pair would make autoscaling impossible to turn on there.
 	prefill := prefillScaling(topo)
 	if prefill.enabled() && !topo.EnablePrefill {
 		return fmt.Errorf("prefill autoscaling requires enablePrefill")
@@ -160,9 +160,6 @@ func validateLLM(c *controller.Context) error {
 		"topology.parameters.prefillScalingActuator",
 	); err != nil {
 		return err
-	}
-	if topo.PrefillReplicas != nil && prefill.enabled() {
-		return fmt.Errorf("topology.parameters.prefillReplicas cannot be set with prefillMinReplicas, prefillMaxReplicas, or prefillScalingActuator")
 	}
 	if decode.enabled() && prefill.enabled() && resolvedActuator(decode.actuator) != resolvedActuator(prefill.actuator) {
 		return fmt.Errorf("decode and prefill must use the same scalingActuator (KServe WVA)")
