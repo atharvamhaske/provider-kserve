@@ -70,6 +70,9 @@ func assertPodMonitor(t *testing.T, pm *unstructured.Unstructured, name string, 
 	if pm.GroupVersionKind() != podMonitorGVK {
 		t.Fatalf("GVK = %v, want %v", pm.GroupVersionKind(), podMonitorGVK)
 	}
+	if got := pm.GetLabels()["core.openeverest.io/instance"]; got != name {
+		t.Fatalf("instance label = %q, want %q", got, name)
+	}
 
 	labels, found, err := unstructured.NestedStringMap(pm.Object, "spec", "selector", "matchLabels")
 	if err != nil || !found {
