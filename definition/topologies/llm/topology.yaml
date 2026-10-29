@@ -287,11 +287,16 @@ ui:
         the cache to remove it. The LocalModel chart feature must be enabled.
       components:
         cacheEnabled:
-          uiType: toggle
+          uiType: select
           path: spec.components.llmEngine.parameters.localModelCache.enabled
           fieldParams:
             label: Enable model cache
             defaultValue: false
+            options:
+            - label: Disabled
+              value: false
+            - label: Enabled
+              value: true
             helperText: >-
               Reuses one downloaded model copy per matching node instead of
               downloading the model for every Pod.

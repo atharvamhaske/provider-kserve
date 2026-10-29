@@ -70,6 +70,14 @@ if [ "$(cache_ui_path "$DEFAULT_MANIFEST")" != "spec.components.llmEngine.parame
   echo "Provider cache UI schema is missing" >&2
   exit 1
 fi
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.cacheEnabled.uiType' "$DEFAULT_MANIFEST")" != "select" ]; then
+  echo "Provider cache enable control is not renderable by the OpenEverest form" >&2
+  exit 1
+fi
+if [ "$("$YQ_BIN" ea -r 'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.cacheEnabled.fieldParams.options[1].value' "$DEFAULT_MANIFEST")" != "true" ]; then
+  echo "Provider cache enable control does not emit a boolean" >&2
+  exit 1
+fi
 
 if [ "$(resource_name Deployment kserve-localmodel-controller-manager "$ENABLED_MANIFEST")" != "kserve-localmodel-controller-manager" ]; then
   echo "LocalModel controller missing while enabled" >&2

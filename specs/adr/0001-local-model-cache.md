@@ -31,7 +31,7 @@ The provider enforces tenant authorization for every referenced download Service
 
 3. The feature is limited to the LLM topology. No OpenEverest core or UI source change is required. The provider definition adds a Model Cache section that the existing UI renderer consumes.
 
-   The UI-schema component key is `cacheEnabled`, while its API path remains `localModelCache.enabled`. OpenEverest reserves the component key `enabled` and omits that control from the rendered form.
+   The UI-schema component key is `cacheEnabled`, while its API path remains `localModelCache.enabled`. OpenEverest `2.0.0-dev.2` omits `uiType: toggle` controls from form steps. This field uses a select with Boolean Enabled and Disabled values so the existing renderer exposes it without a core/UI change.
 
 4. `llmEngine.parameters.localModelCache` contains `enabled`, `modelSize`, `nodeGroup`, and optional `serviceAccountName`. The UI accepts `modelSize` as a number in Gi and emits a Kubernetes quantity. API clients may submit any positive Kubernetes quantity.
 

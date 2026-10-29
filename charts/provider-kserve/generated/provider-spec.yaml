@@ -548,8 +548,13 @@ spec:
                 defaultValue: false
                 helperText: Reuses one downloaded model copy per matching node instead of downloading the model for every Pod.
                 label: Enable model cache
+                options:
+                  - label: Disabled
+                    value: false
+                  - label: Enabled
+                    value: true
               path: spec.components.llmEngine.parameters.localModelCache.enabled
-              uiType: toggle
+              uiType: select
             modelSize:
               fieldParams:
                 badge: Gi
