@@ -44,7 +44,7 @@ provider_env() {
 
 cache_ui_path() {
   "$YQ_BIN" ea -r \
-    'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.enabled.path' \
+    'select(.kind == "Provider") | .spec.uiSchema.llm.sections.cache.components.cacheEnabled.path' \
     "$1"
 }
 

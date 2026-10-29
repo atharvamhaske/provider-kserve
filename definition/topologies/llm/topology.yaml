@@ -286,7 +286,7 @@ ui:
         The provider creates a namespace cache owned by this instance. Disable
         the cache to remove it. The LocalModel chart feature must be enabled.
       components:
-        enabled:
+        cacheEnabled:
           uiType: toggle
           path: spec.components.llmEngine.parameters.localModelCache.enabled
           fieldParams:
@@ -329,7 +329,7 @@ ui:
               Optional ServiceAccount for model credentials in the KServe
               LocalModel jobs namespace.
       componentsOrder:
-      - enabled
+      - cacheEnabled
       - modelSize
       - nodeGroup
       - serviceAccountName

@@ -543,7 +543,7 @@ spec:
           label: Basic Information
         cache:
           components:
-            enabled:
+            cacheEnabled:
               fieldParams:
                 defaultValue: false
                 helperText: Reuses one downloaded model copy per matching node instead of downloading the model for every Pod.
@@ -582,7 +582,7 @@ spec:
               path: spec.components.llmEngine.parameters.localModelCache.serviceAccountName
               uiType: text
           componentsOrder:
-            - enabled
+            - cacheEnabled
             - modelSize
             - nodeGroup
             - serviceAccountName
