@@ -14,7 +14,7 @@ spec:
       resources:
         limits:
           cpu: "2"
-          memory: 6Gi
+          memory: 2Gi
       parameters:
         modelURI: hf://HuggingFaceTB/SmolLM2-135M-Instruct
         modelName: smollm2-135m-instruct

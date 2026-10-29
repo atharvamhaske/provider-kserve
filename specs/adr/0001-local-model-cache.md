@@ -47,6 +47,8 @@ The provider enforces tenant authorization for every referenced download Service
 
 10. The chart raises KServe's LocalModel download-job memory limit from 1 GiB to 4 GiB. The 1 GiB upstream default OOM-killed the 135M-parameter end-to-end model download.
 
+   The single-node end-to-end fixture limits the SmolLM2 model server to 2 GiB so it can run beside the 4 GiB download Job on an 8 GiB k3d node. Production Instance sizing remains user-controlled.
+
 11. The storage initializer setting must remain enabled on the requested LLM service. KServe performs LocalModel matching in that path, then admission replaces the download path with the cached PVC. The admitted model pod therefore has no storage-initializer container.
 
 12. The provider may apply mutable cache fields in place only while the existing cache has the same source URI and the expected Instance controller owner. It rejects unowned or foreign-owned same-name resources without changing either the cache or workload.
